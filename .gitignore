@@ -12,3 +12,6 @@ wheels/
 # Tooling caches
 .atl/*.cache.json
 .pytest_cache/
+
+# Internal project docs
+AGENT-BRIDGE-SPEC.md
