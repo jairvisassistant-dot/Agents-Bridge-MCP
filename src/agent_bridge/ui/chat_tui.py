@@ -484,7 +484,10 @@ class ChatTUI(App):
             log.write("[red]Error: sin respuesta del servidor[/]")
         elif isinstance(result, dict) and "warning" in result:
             log = self.query_one("#chat-log", RichLog)
-            log.write(f"[bold class=warning]⚠ {result['warning']}[/]")
+            log.write(f"[bold yellow]⚠ {rich_escape(result['warning'])}[/bold yellow]")
+        else:
+            # Refresh immediately so the sent message appears without waiting for the next poll
+            await self._fetch_messages()
 
     @staticmethod
     def _format_time(iso_str: str) -> str:
