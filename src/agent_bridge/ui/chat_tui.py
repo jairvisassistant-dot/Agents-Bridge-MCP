@@ -17,6 +17,7 @@ from typing import Any
 
 from rich.markup import escape as rich_escape
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import Button, Input, RichLog, Static
@@ -237,6 +238,8 @@ class ChatTUI(App):
     }
     """
 
+    BINDINGS = [Binding("ctrl+l", "clear_log", "Limpiar pantalla")]
+
     agent_status: reactive[dict[str, str]] = reactive({})
 
     def __init__(self, db_path: str = "bridge.db") -> None:
@@ -360,11 +363,22 @@ class ChatTUI(App):
         if event.input.id == "msg-input":
             await self._do_send()
 
+    def action_clear_log(self) -> None:
+        """Clear the visible chat log without affecting the database."""
+        log = self.query_one("#chat-log", RichLog)
+        log.clear()
+        log.write("[dim]— pantalla limpiada —[/dim]")
+
     async def _do_send(self) -> None:
-        """Send the current input as a chat message."""
+        """Send the current input as a chat message, or handle /commands."""
         inp = self.query_one("#msg-input", Input)
         text = inp.value.strip()
         if not text:
+            return
+
+        if text == "/clear":
+            inp.value = ""
+            self.action_clear_log()
             return
 
         inp.value = ""
@@ -378,11 +392,13 @@ class ChatTUI(App):
 
     @staticmethod
     def _format_time(iso_str: str) -> str:
-        """Format ISO timestamp to HH:MM."""
+        """Format ISO timestamp to HH:MM in local time."""
         if not iso_str:
             return ""
         try:
             dt = datetime.fromisoformat(iso_str)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()  # UTC → local timezone
             return dt.strftime("%H:%M")
         except (ValueError, TypeError):
             return iso_str[:5] if len(iso_str) >= 5 else iso_str
