@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -383,9 +384,11 @@ class ChatTUI(App):
 
         log = self.query_one("#chat-log", RichLog)
         for msg in messages:
-            if isinstance(msg, dict):
-                # Use rowid for since filter (UUID strings don't sort chronologically)
-                self._known_id = msg.get("rowid", msg.get("id", self._known_id))
+            if not isinstance(msg, dict):
+                continue
+            # Always advance _known_id first so a render error never re-fetches the same message
+            self._known_id = msg.get("rowid", msg.get("id", self._known_id))
+            try:
                 ts = self._format_time(msg.get("created_at", ""))
                 sender = rich_escape(msg.get("sender", "?"))
                 text = rich_escape(msg.get("text", ""))
@@ -393,9 +396,12 @@ class ChatTUI(App):
 
                 line = f"[dim]{ts}[/dim] [bold]{sender}:[/bold]"
                 if target:
-                    line += f" [bold class=mention]@{rich_escape(target)}[/]"
+                    # Use valid Rich styles — CSS classes don't apply inside RichLog markup
+                    line += f" [bold cyan]@{rich_escape(target)}[/bold cyan]"
                 line += f" {text}"
                 log.write(line)
+            except Exception as exc:
+                logger.warning("Failed to render message rowid=%s: %s", self._known_id, exc)
 
     async def _fetch_agents(self) -> None:
         """Fetch registered agents and their statuses."""
@@ -467,7 +473,12 @@ class ChatTUI(App):
             return
 
         inp.value = ""
-        result = await self._client.call_tool("chat.send", {"text": text, "sender": "human"})
+        # Extract first @mention from text to set the routing target
+        mention = re.search(r"@(\w+)", text)
+        args: dict[str, Any] = {"text": text, "sender": "human"}
+        if mention:
+            args["target"] = mention.group(1)
+        result = await self._client.call_tool("chat.send", args)
         if result is None:
             log = self.query_one("#chat-log", RichLog)
             log.write("[red]Error: sin respuesta del servidor[/]")
