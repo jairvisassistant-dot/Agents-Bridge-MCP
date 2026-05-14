@@ -4,13 +4,16 @@ import argparse
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import anyio
 
 from agent_bridge.server import create_server
 from agent_bridge.state.database import Database
+from agent_bridge.config import BridgeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +121,285 @@ def _run_sse_server(
     uvicorn.run(app, host=host, port=port)
 
 
-# ── Reset subcommand ────────────────────────────────────────────────
+# ── Init subcommand ────────────────────────────────────────────────
+
+
+SKILL_TEMPLATES = {
+    "dev.Skill": """\
+---
+name: agent-bridge-dev
+description: "Trigger: @dev.Skill, @desarrollador. Conecta OpenCode al Agent Bridge como rol Desarrollador."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "1.0"
+---
+
+## Activation Contract
+
+Ejecutar cuando el humano invoque `@dev.Skill`. Conecta esta terminal al Agent Bridge como el agente **Desarrollador**.
+
+## Hard Rules
+
+- **Siempre hacer git pull** antes de empezar a trabajar.
+- **Siempre hacer git push** antes de finalizar o al cambiar de tarea importante.
+- **Siempre reportar disponibilidad en la TUI** via `chat.send` al conectarse.
+- **Nunca trabajar sin estar conectado** al bridge. Si la conexión falla, reportar y detenerse.
+- **Seguir el rol Desarrollador**: solo tools permitidas (`task.list`, `task.get`, `task.claim`, `task.submit_work`, `chat.*`, `agent.*`, `skill.*`).
+- **Si el humano interviene** via TUI con `@desarrollador`, atender inmediatamente.
+
+## Protocolo de comunicación en TUI
+
+- **Al conectarse**: leer mensajes pendientes con `chat.read` para ver si hay algo sin responder.
+- **Verificar threads pendientes**: usar `chat.thread_get_pending(agent_name="desarrollador")` al iniciar y al terminar cada tarea.
+- **Siempre usar @nombre** al dirigirse a alguien específico (`@arquitecto`, `@humano`).
+- **Threads para conversaciones bilaterales**: si necesitás intercambiar más de 2 mensajes con el arquitecto, abrir un thread con `chat.thread_create`.
+- **Brevedad**: máximo 4 líneas por mensaje en la TUI. Si la respuesta es larga, estructurala con bullets.
+- **Sin @mention**: si el mensaje es de implementación o pregunta técnica de código, respondés vos. Si es de arquitectura o diseño, derivar con `@arquitecto`.
+- **Reportar progreso**: al iniciar una tarea, avisar con `@arquitecto` o `@humano` qué estás haciendo. Al terminar, avisar también.
+- **Acuse de recibo**: si recibís una pregunta, responder aunque sea con "viendo..." para no dejar silencio.
+- **Preguntas al arquitecto**: si tenés dudas de diseño antes de implementar, preguntar ANTES de tocar código.
+
+## Decision Gates
+
+| Situación | Acción |
+|-----------|--------|
+| `agent-bridge` no está instalado | `uv tool install --editable <ruta-al-proyecto>` |
+| No hay tareas pendientes | Reportar y esperar instrucciones |
+| Hay tareas pendientes | Listarlas y preguntar cuál tomar |
+| Git push falla por conflictos | NO resolver automáticamente. Avisar al humano |
+
+## Execution Steps
+
+### 1. Verificar entorno
+`which agent-bridge || uv tool list | grep agent-bridge`
+
+### 2. Sincronizar repo
+`git pull --rebase`
+
+### 3. Verificar conexión
+La conexión al bridge es automática vía MCP (configurada en `.mcp.json` del agente). Solo verificar con `agent.heartbeat`.
+
+### 4. Ver quién está online
+`agent.list` para ver si el arquitecto está conectado antes de preguntar o esperar respuesta.
+
+### 5. Reportar disponibilidad en TUI
+`chat.send(sender="desarrollador", text="🟢 Desarrollador conectado y listo")`
+
+### 6. Leer mensajes pendientes
+`chat.read` para ver si hay mensajes sin responder del humano o del arquitecto.
+`chat.thread_get_pending(agent_name="desarrollador")` para ver threads pendientes.
+
+### 7. Consultar tareas pendientes
+`task.list(status="pending")`
+
+### 8. Ciclo de trabajo
+Esperar mensajes, ejecutar tareas asignadas, reportar progreso.
+**Al inicio de cada respuesta al humano o arquitecto**: llamar `agent.heartbeat` para mantenerse online en el bridge y `chat.read` para ver mensajes nuevos.
+
+### 9. Subir cambios al finalizar
+`git add -A && git commit && git push`
+
+Avisar en TUI: "⬆ Cambios subidos al repo"
+""",
+    "architect.Skill": """\
+---
+name: agent-bridge-architect
+description: "Trigger: @architect.Skill, @arquitecto. Conecta Claude Code al Agent Bridge como rol Arquitecto."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "1.0"
+---
+
+## Activation Contract
+
+Ejecutar cuando el humano invoque `@architect.Skill`. Conecta esta terminal al Agent Bridge como el agente **Arquitecto**.
+
+## Hard Rules
+
+- **Siempre hacer git pull** antes de empezar.
+- **Siempre hacer git push** al finalizar o completar un plan.
+- **Siempre reportar disponibilidad en la TUI** via `chat.send`.
+- **No implementar tareas** — tu rol es planificar y revisar.
+- **Seguir el rol Arquitecto**: solo tools permitidas (`plan.*`, `task.create`, `task.get_diff`, `review.*`, `chat.*`, `agent.*`, `skill.*`).
+- **Si el humano interviene** via TUI con `@arquitecto`, atender inmediatamente.
+- **Máximo 3 ciclos de revisión** por tarea, luego escalar al humano.
+
+## Protocolo de comunicación en TUI
+
+- **Al conectarse**: leer mensajes pendientes con `chat.read` para ver si hay algo sin responder.
+- **Verificar threads pendientes**: usar `chat.thread_get_pending(agent_name="arquitecto")` al iniciar y al terminar cada tarea.
+- **Siempre usar @nombre** al dirigirse a alguien específico (`@desarrollador`, `@humano`).
+- **Threads para conversaciones bilaterales**: si necesitás intercambiar más de 2 mensajes con el dev, abrir un thread con `chat.thread_create`.
+- **Brevedad**: máximo 4 líneas por mensaje en la TUI. Si la respuesta es larga, estructurala con bullets.
+- **Sin @mention del humano**: si el mensaje es de rol relevante para arquitectura o revisión, respondés vos. Si es de implementación, derivar con `@desarrollador`.
+- **Notificar al dev**: al crear o actualizar tareas/planes, siempre notificar con `@desarrollador` en el chat indicando qué cambió.
+- **Acuse de recibo**: si recibís una pregunta, responder aunque sea con "viendo..." para no dejar silencio.
+
+## Decision Gates
+
+| Situación | Acción |
+|-----------|--------|
+| No hay plan activo | Preguntar al humano si quiere crear uno |
+| El dev entrega trabajo | Iniciar revisión con `review.start` |
+| El trabajo necesita cambios | `review.request_changes` con detalle |
+| El trabajo está correcto | `review.approve` |
+
+## Execution Steps
+
+### 1. Verificar entorno
+Verificar que `agent-bridge` esté instalado.
+
+### 2. Sincronizar repo
+`git pull --rebase`
+
+### 3. Verificar conexión
+La conexión al bridge es automática vía MCP (configurada en `.mcp.json`). Solo verificar con `agent.heartbeat`.
+
+### 4. Ver quién está online
+`agent.list` para ver qué agentes están conectados antes de asignar trabajo.
+
+### 5. Reportar disponibilidad en TUI
+`chat.send(sender="arquitecto", text="🟢 Arquitecto conectado y listo")`
+
+### 6. Leer mensajes pendientes
+`chat.read` para ver si hay mensajes sin responder del humano o del dev.
+`chat.thread_get_pending(agent_name="arquitecto")` para ver threads pendientes.
+
+### 7. Consultar plan activo
+`plan.list` para ver planes activos.
+
+### 8. Ciclo de planificación y revisión
+Crear planes, definir tareas, revisar entregas, aprobar o pedir cambios.
+**Al inicio de cada respuesta al humano**: llamar `agent.heartbeat` para mantenerse online en el bridge y `chat.read` para ver mensajes nuevos del bridge.
+
+### 9. Subir cambios al finalizar
+`git add -A && git commit && git push`
+""",
+}
+
+
+def _handle_init(args: argparse.Namespace) -> None:
+    """Handle the `init` subcommand: bootstrap Agent Bridge in a project."""
+    target = Path(args.path).resolve()
+    add_dev_dep = args.dev_dep
+    agent_bridge_src = Path(__file__).parent.parent.parent.resolve()
+
+    print(f"🔧 Iniciando Agent Bridge en: {target}")
+    print()
+
+    # ── 1. bridge.json ─────────────────────────────────────────
+    bridge_path = target / "bridge.json"
+    if bridge_path.exists():
+        print(f"  ✓ bridge.json ya existe")
+    else:
+        BridgeConfig.init_default_config(bridge_path)
+        print(f"  ✅ Creado bridge.json")
+
+    # ── 2. .agentes/ skills ────────────────────────────────────
+    agentes_dir = target / ".agentes"
+    agentes_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, content in SKILL_TEMPLATES.items():
+        skill_path = agentes_dir / filename
+        if skill_path.exists():
+            print(f"  ✓ .agentes/{filename} ya existe")
+        else:
+            skill_path.write_text(content)
+            print(f"  ✅ Creado .agentes/{filename}")
+
+    print()
+
+    # ── 3. Instalación global (si no está disponible) ──────────
+    agent_bridge_cmd = shutil.which("agent-bridge")
+    if agent_bridge_cmd is None:
+        print("  ⚠ agent-bridge no está instalado globalmente.")
+        print(f"     ¿Querés instalarlo ahora?")
+        try:
+            resp = input("     Instalar globalmente? [y/N] ")
+        except (EOFError, OSError):
+            resp = "n"
+        if resp.lower() in ("y", "yes"):
+            result = subprocess.run(
+                ["uv", "tool", "install", "--editable", str(agent_bridge_src)],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print("  ✅ agent-bridge instalado globalmente")
+            else:
+                print(f"  ⚠ Error: {result.stderr.strip()}")
+        else:
+            print("  📦 Para instalarlo manualmente después:")
+            print(f"     uv tool install --editable {agent_bridge_src}")
+        print()
+
+    # ── 4. Dev dependency (--dev-dep) ──────────────────────────
+    if add_dev_dep:
+        pyproject = target / "pyproject.toml"
+        if not pyproject.exists():
+            print("  ⚠ No hay pyproject.toml en este proyecto.")
+            try:
+                resp = input("     ¿Crear uno básico e instalar agent-bridge como dev dep? [y/N] ")
+            except (EOFError, OSError):
+                resp = "n"
+            if resp.lower() in ("y", "yes"):
+                pyproject.write_text(
+                    '[project]\nname = "my-project"\nversion = "0.1.0"\n'
+                    'requires-python = ">=3.12"\n'
+                )
+                print("  ✅ Creado pyproject.toml")
+            else:
+                pyproject = None  # skip
+
+        if pyproject and pyproject.exists():
+            print(f"  📦 Instalando agent-bridge como dependencia de desarrollo...")
+            result = subprocess.run(
+                ["uv", "add", "--dev", "--editable", str(agent_bridge_src)],
+                cwd=target, capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print(f"  ✅ agent-bridge agregado como dev dependency")
+            else:
+                print(f"  ⚠ Error: {result.stderr.strip()}")
+                print("  📦 Podés intentar manualmente:")
+                print(f"     cd {target}")
+                print(f"     uv add --dev --editable {agent_bridge_src}")
+        print()
+
+    # ── 5. Validación ──────────────────────────────────────────
+    print("  🔍 Validando instalación...")
+    try:
+        result = subprocess.run(
+            ["agent-bridge", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            print(f"  ✅ {result.stdout.strip() or 'agent-bridge funciona correctamente'}")
+        else:
+            print(f"  ⚠ agent-bridge no responde. {result.stderr.strip()}")
+    except FileNotFoundError:
+        print("  ⚠ agent-bridge no encontrado en el PATH.")
+        print(f"     Instalalo globalmente: uv tool install --editable {agent_bridge_src}")
+    except Exception as e:
+        print(f"  ⚠ Error de validación: {e}")
+    print()
+
+    # ── 6. Resumen final ───────────────────────────────────────
+    print("✅ Agent Bridge inicializado en este proyecto.")
+    print()
+    print("📋 Próximos pasos:")
+    print()
+    print("  1. Terminal 1 — Levantar la TUI:")
+    print("     cd", target)
+    print("     agent-bridge start")
+    print()
+    print("  2. Terminal 2 — Conectar OpenCode (Desarrollador):")
+    print("     @dev.Skill")
+    print()
+    print("  3. Terminal 3 — Conectar Claude Code (Arquitecto):")
+    print("     @architect.Skill")
+    print()
 
 
 def _handle_reset(args: argparse.Namespace) -> None:
@@ -190,6 +471,21 @@ def main() -> None:
 
     # ── Subcommands ────────────────────────────────────────────────
     subparsers = parser.add_subparsers(dest="command")
+
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize Agent Bridge in the current project",
+    )
+    init_parser.add_argument(
+        "--path",
+        default=".",
+        help="Project path (default: current directory)",
+    )
+    init_parser.add_argument(
+        "--dev-dep",
+        action="store_true",
+        help="Also add agent-bridge as a dev dependency via `uv add --dev --editable`",
+    )
 
     start_parser = subparsers.add_parser(
         "start",
@@ -317,6 +613,10 @@ def main() -> None:
     )
 
     # ── Route subcommands ──────────────────────────────────────────
+    if args.command == "init":
+        _handle_init(args)
+        return
+
     if args.command == "start":
         _handle_start(args)
         return
