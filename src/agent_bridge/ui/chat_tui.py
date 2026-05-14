@@ -16,13 +16,50 @@ from datetime import datetime
 from typing import Any
 
 from rich.markup import escape as rich_escape
+from rich.table import Table
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
+from textual.suggester import Suggester
 from textual.widgets import Button, Input, RichLog, Static
 
 logger = logging.getLogger(__name__)
+
+# ── Autocomplete ───────────────────────────────────────────────────────────────
+
+_MENTIONS = ["@arquitecto", "@desarrollador", "@humano", "@all"]
+_COMMANDS = ["/clear", "/help"]
+
+_HELP_ROWS = [
+    ("Mención",      "@arquitecto",   "Enviar mensaje al Arquitecto"),
+    ("Mención",      "@desarrollador","Enviar mensaje al Desarrollador"),
+    ("Mención",      "@humano",       "Enviar mensaje al humano"),
+    ("Mención",      "@all",          "Enviar mensaje a todos"),
+    ("Comando",      "/clear",        "Limpiar la pantalla (no borra la DB)"),
+    ("Comando",      "/help",         "Mostrar esta tabla de ayuda"),
+    ("Atajo",        "Ctrl+L",        "Limpiar la pantalla"),
+    ("Atajo",        "F1",            "Mostrar / ocultar panel de ayuda rápida"),
+    ("Atajo",        "Tab / →",       "Aceptar autocompletado"),
+]
+
+
+class AgentSuggester(Suggester):
+    """Complete @mentions and /commands based on the last token in the input.
+
+    Works mid-sentence: typing "hola @arq" suggests "hola @arquitecto".
+    """
+
+    async def get_suggestion(self, value: str) -> str | None:
+        parts = value.rsplit(" ", 1)
+        last = parts[-1]
+        if not last.startswith(("@", "/")):
+            return None
+        prefix = parts[0] + " " if len(parts) > 1 else ""
+        for candidate in _MENTIONS + _COMMANDS:
+            if candidate.startswith(last) and candidate != last:
+                return prefix + candidate
+        return None
 
 
 class MCPClient:
@@ -209,6 +246,18 @@ class ChatTUI(App):
         padding: 0 1;
     }
 
+    #help-panel {
+        height: auto;
+        max-height: 14;
+        border: solid $accent;
+        padding: 0 1;
+        display: none;
+    }
+
+    #help-panel.visible {
+        display: block;
+    }
+
     #input-row {
         height: 3;
         dock: bottom;
@@ -238,7 +287,10 @@ class ChatTUI(App):
     }
     """
 
-    BINDINGS = [Binding("ctrl+l", "clear_log", "Limpiar pantalla")]
+    BINDINGS = [
+        Binding("ctrl+l", "clear_log", "Limpiar pantalla"),
+        Binding("f1",     "toggle_help", "Ayuda"),
+    ]
 
     agent_status: reactive[dict[str, str]] = reactive({})
 
@@ -255,8 +307,13 @@ class ChatTUI(App):
     def compose(self) -> ComposeResult:
         yield Static(id="status-bar")
         yield RichLog(id="chat-log", highlight=True, markup=True)
+        yield Static(self._build_help_text(), id="help-panel", markup=True)
         with Horizontal(id="input-row"):
-            yield Input(id="msg-input", placeholder="Escribí tu mensaje…")
+            yield Input(
+                id="msg-input",
+                placeholder="Escribí tu mensaje… (@arquitecto, /help, F1)",
+                suggester=AgentSuggester(use_cache=False),
+            )
             yield Button("Enviar", id="send-btn", variant="primary")
 
     async def on_mount(self) -> None:
@@ -369,6 +426,29 @@ class ChatTUI(App):
         log.clear()
         log.write("[dim]— pantalla limpiada —[/dim]")
 
+    def action_toggle_help(self) -> None:
+        """Show or hide the quick-reference help panel."""
+        panel = self.query_one("#help-panel", Static)
+        if "visible" in panel.classes:
+            panel.remove_class("visible")
+        else:
+            panel.add_class("visible")
+
+    @staticmethod
+    def _build_help_text() -> str:
+        """Build the quick-reference table as Rich markup."""
+        lines = [
+            "[bold]Referencia rápida[/bold]  [dim](F1 para cerrar)[/dim]",
+            "",
+            f"  [bold cyan]{'Tipo':<10}{'Token / Atajo':<18}Descripción[/bold cyan]",
+            f"  [dim]{'─'*10}{'─'*18}{'─'*32}[/dim]",
+        ]
+        type_color = {"Mención": "green", "Comando": "yellow", "Atajo": "blue"}
+        for kind, token, desc in _HELP_ROWS:
+            color = type_color.get(kind, "white")
+            lines.append(f"  [{color}]{kind:<10}[/{color}][bold]{token:<18}[/bold]{desc}")
+        return "\n".join(lines)
+
     async def _do_send(self) -> None:
         """Send the current input as a chat message, or handle /commands."""
         inp = self.query_one("#msg-input", Input)
@@ -379,6 +459,11 @@ class ChatTUI(App):
         if text == "/clear":
             inp.value = ""
             self.action_clear_log()
+            return
+
+        if text == "/help":
+            inp.value = ""
+            self.action_toggle_help()
             return
 
         inp.value = ""
