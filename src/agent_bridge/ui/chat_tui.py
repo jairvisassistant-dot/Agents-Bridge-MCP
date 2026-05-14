@@ -15,6 +15,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
+from rich.markup import escape as rich_escape
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.reactive import reactive
@@ -45,6 +46,7 @@ class MCPClient:
         self._process: asyncio.subprocess.Process | None = None
         self._msg_id = 1
         self._initialized = False
+        self._lock = asyncio.Lock()  # one request in flight at a time
         self._on_reconnecting = on_reconnecting  # async callable(n_attempt)
         self._on_reconnected = on_reconnected    # async callable()
 
@@ -115,6 +117,11 @@ class MCPClient:
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call an MCP tool and return the parsed result content."""
+        async with self._lock:
+            return await self._call_tool_unsafe(name, arguments)
+
+    async def _call_tool_unsafe(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        """Inner call_tool — must only be called while holding self._lock."""
         connected = await self._ensure_connected()
         if not connected:
             return None
@@ -253,7 +260,8 @@ class ChatTUI(App):
         """Connect to MCP server and start polling."""
         try:
             await self._client.connect()
-            self.log.write("[green]✓ Conectado al Agent Bridge[/]")
+            log = self.query_one("#chat-log", RichLog)
+            log.write("[green]✓ Conectado al Agent Bridge[/]")
         except Exception as exc:
             self._write_status("AGENT BRIDGE — ERROR DE CONEXIÓN")
             log = self.query_one("#chat-log", RichLog)
@@ -293,16 +301,13 @@ class ChatTUI(App):
     async def _poll(self) -> None:
         """Poll for new messages and agent status every 5 seconds."""
         try:
-            await asyncio.gather(
-                self._fetch_messages(),
-                self._fetch_agents(),
-                return_exceptions=True,
-            )
+            await self._fetch_messages()
+            await self._fetch_agents()
         except Exception as exc:
             logger.warning("Poll error: %s", exc)
 
     async def _fetch_messages(self) -> None:
-        """Fetch new messages since the last known ID."""
+        """Fetch new messages since the last known rowid."""
         params: dict[str, Any] = {}
         if self._known_id:
             params["since"] = self._known_id
@@ -319,15 +324,16 @@ class ChatTUI(App):
         log = self.query_one("#chat-log", RichLog)
         for msg in messages:
             if isinstance(msg, dict):
-                self._known_id = msg.get("id", self._known_id)
+                # Use rowid for since filter (UUID strings don't sort chronologically)
+                self._known_id = msg.get("rowid", msg.get("id", self._known_id))
                 ts = self._format_time(msg.get("created_at", ""))
-                sender = msg.get("sender", "?")
-                text = msg.get("text", "")
+                sender = rich_escape(msg.get("sender", "?"))
+                text = rich_escape(msg.get("text", ""))
                 target = msg.get("target")
 
                 line = f"[dim]{ts}[/dim] [bold]{sender}:[/bold]"
                 if target:
-                    line += f" [bold class=mention]@{target}[/]"
+                    line += f" [bold class=mention]@{rich_escape(target)}[/]"
                 line += f" {text}"
                 log.write(line)
 
