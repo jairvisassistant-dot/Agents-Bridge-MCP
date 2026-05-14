@@ -16,12 +16,13 @@ in-memory schema.
 
 import logging
 import sqlite3
+import uuid
 
 import anyio
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 3  # bump this when adding migrations below
+SCHEMA_VERSION = 4  # bump this when adding migrations below
 
 _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP")
 
@@ -115,6 +116,13 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
     if from_version < 3:
         conn.execute("ALTER TABLE tasks ADD COLUMN diff_text TEXT DEFAULT ''")
         logger.info("Migration v2→v3: added diff_text to tasks")
+
+    if from_version < 4:
+        conn.execute("ALTER TABLE messages ADD COLUMN turn_number INTEGER")
+        conn.execute("ALTER TABLE threads ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'")
+        conn.execute("ALTER TABLE threads ADD COLUMN current_turn TEXT")
+        conn.execute("ALTER TABLE threads ADD COLUMN last_activity_at TEXT")
+        logger.info("Migration v3→v4: added discussion fields to threads and messages")
 
 
 class Database:
@@ -258,6 +266,60 @@ class Database:
         Returns rowcount (1 if update succeeded, 0 if condition failed).
         """
         return await anyio.to_thread.run_sync(self._execute_write, sql, params)
+
+    async def with_transaction(self, func):
+        """Run func(conn) atomically inside BEGIN IMMEDIATE + COMMIT.
+
+        The callback receives a sync ``sqlite3.Connection`` and runs in a
+        worker thread.  If it returns, the transaction is committed; if it
+        raises, the transaction is rolled back and the exception propagates.
+
+        Usage::
+
+            result = await db.with_transaction(lambda conn: _sync_fn(conn, arg))
+
+        This is the ONLY way to guarantee that multiple writes are visible
+        as a single atomic unit — both UPDATE (turn claim) and INSERT
+        (message) happen before any other writer can observe the change.
+        """
+        def _run():
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                result = func(conn)
+                conn.commit()
+                return result
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+        return await anyio.to_thread.run_sync(_run)
+
+    async def resolve_thread_atomic(self, thread_id: str, system_text: str) -> bool:
+        """Atomically resolve a thread and insert a system message.
+
+        Uses ``with_transaction`` so that both the status UPDATE and the
+        message INSERT commit (or roll back) together.  Returns ``True``
+        if this call performed the resolution, ``False`` if the thread
+        was already resolved (by a concurrent caller or a background
+        timeout).
+        """
+        def _resolve(conn):
+            cur = conn.execute(
+                "UPDATE threads SET status = 'resolved' WHERE id = ? AND status = 'open'",
+                (thread_id,),
+            )
+            if cur.rowcount == 0:
+                return False
+            conn.execute(
+                "INSERT INTO messages (id, thread_id, sender, text) VALUES (?, ?, 'system', ?)",
+                (str(uuid.uuid4()), thread_id, system_text),
+            )
+            return True
+
+        return await self.with_transaction(_resolve)
 
     # ── Reset ──────────────────────────────────────────────────
 

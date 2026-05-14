@@ -93,6 +93,7 @@ async def _check_permission(
 
 STALE_AGENT_THRESHOLD_MINUTES = 5
 REASSIGN_INTERVAL_SECONDS = 60
+THREAD_TIMEOUT_MINUTES = 5
 
 
 async def _reassign_stale_tasks(db: Database) -> dict:
@@ -121,21 +122,52 @@ async def _reassign_stale_tasks(db: Database) -> dict:
     return {"stale_agents": agent_ids, "reassigned_count": total_reassigned}
 
 
-async def _reassign_loop(db: Database) -> None:
-    """Background task: periodically check for and reassign stale agents."""
+async def _resolve_stale_threads(db: Database) -> dict:
+    """Auto-resolve discussion threads inactive longer than the timeout.
+
+    Also inserts a system message for each resolved thread.
+    """
+    stale = await db.execute(
+        """SELECT id FROM threads
+           WHERE status = 'open'
+             AND participants != '[]'
+             AND last_activity_at IS NOT NULL
+             AND last_activity_at < datetime('now', ?)""",
+        (f'-{THREAD_TIMEOUT_MINUTES} minutes',),
+    )
+    if not stale:
+        return {"resolved_count": 0}
+
+    resolved_count = 0
+    for tid in (r["id"] for r in stale):
+        won = await db.resolve_thread_atomic(
+            tid,
+            f"Thread auto-resolved after {THREAD_TIMEOUT_MINUTES} minutes of inactivity.",
+        )
+        if won:
+            resolved_count += 1
+
+    logger.info("Auto-resolved %d stale thread(s)", resolved_count)
+    return {"resolved_count": resolved_count}
+
+
+async def _maintenance_loop(db: Database) -> None:
+    """Background task: reassign stale agents + resolve stale threads."""
     logger.info(
-        "Starting reassign loop (interval=%ds, threshold=%dmin)",
+        "Starting maintenance loop (interval=%ds, agent_threshold=%dmin, thread_timeout=%dmin)",
         REASSIGN_INTERVAL_SECONDS, STALE_AGENT_THRESHOLD_MINUTES,
+        THREAD_TIMEOUT_MINUTES,
     )
     while True:
         try:
             await asyncio.sleep(REASSIGN_INTERVAL_SECONDS)
             await _reassign_stale_tasks(db)
+            await _resolve_stale_threads(db)
         except asyncio.CancelledError:
-            logger.info("Reassign loop cancelled")
+            logger.info("Maintenance loop cancelled")
             break
         except Exception:
-            logger.exception("Error in reassign loop")
+            logger.exception("Error in maintenance loop")
 
 
 # ── Server factory ────────────────────────────────────────────────
@@ -230,8 +262,8 @@ def create_server(
     async def init() -> None:
         """Initialize database on server start."""
         await db.initialize()
-        # Start background task for stale agent reassignment
-        asyncio.create_task(_reassign_loop(db))
+        # Start background tasks
+        asyncio.create_task(_maintenance_loop(db))
         logger.info(
             "Server initialized (db=%s, agent=%s)",
             db.db_path,

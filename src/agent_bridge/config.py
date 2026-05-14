@@ -32,6 +32,7 @@ BUILTIN_SKILLS: dict[str, Skill] = {
             "review.start", "review.approve", "review.request_changes",
             "review.get_history",
             "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
+            "chat.thread_get_pending", "chat.thread_resolve",
             "agent.heartbeat", "agent.list", "agent.get", "agent.set_status",
             "agent.whoami",
             "skill.list", "skill.get",
@@ -57,6 +58,7 @@ BUILTIN_SKILLS: dict[str, Skill] = {
         allowed_tools=[
             "task.list", "task.get", "task.claim", "task.submit_work",
             "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
+            "chat.thread_get_pending", "chat.thread_resolve",
             "agent.heartbeat", "agent.list", "agent.get", "agent.set_status",
             "agent.whoami",
             "skill.list", "skill.get",
@@ -80,6 +82,7 @@ BUILTIN_SKILLS: dict[str, Skill] = {
         description="Skill por defecto — solo chat y presencia",
         allowed_tools=[
             "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
+            "chat.thread_get_pending", "chat.thread_resolve",
             "agent.heartbeat", "agent.list", "agent.get",
             "agent.whoami",
             "skill.list", "skill.get",

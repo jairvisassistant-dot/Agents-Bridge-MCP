@@ -102,3 +102,58 @@ class TestPermissionLayer:
             result = await self._call(server, "agent.list")
             assert any(a["agent_id"] == "test-arch" for a in result)
         anyio.run(run)
+
+    # ── Bug 1: archtect permission for discussion tools ────────────
+
+    def test_architect_can_call_thread_get_pending(self, db_path):
+        """Architect role is allowed to call chat.thread_get_pending."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-arch")
+            await init()
+            await self._call(server, "agent.heartbeat", {
+                "agent_id": "test-arch", "role": "architect",
+            })
+            # Must not return permission_denied
+            result = await self._call(server, "chat.thread_get_pending", {
+                "agent_name": "arquitecto",
+            })
+            assert isinstance(result, list)  # empty list = success, no permission error
+
+        anyio.run(run)
+
+    def test_architect_can_call_thread_resolve(self, db_path):
+        """Architect role is allowed to call chat.thread_resolve."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-arch")
+            await init()
+            await self._call(server, "agent.heartbeat", {
+                "agent_id": "test-arch", "role": "architect",
+            })
+
+            # Create a thread first, then resolve it
+            thread = await self._call(server, "chat.thread_create", {
+                "title": "Architect resolve",
+                "participants": ["arquitecto", "desarrollador"],
+            })
+            result = await self._call(server, "chat.thread_resolve", {
+                "thread_id": thread["thread_id"],
+            })
+            assert "error" not in result
+            assert result["status"] == "resolved"
+
+        anyio.run(run)
+
+    def test_default_role_can_call_discussion_tools(self, db_path):
+        """Default role (no heartbeat) can call discussion tools."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-default")
+            await init()
+            # No heartbeat — default role
+
+            # thread_get_pending works
+            result = await self._call(server, "chat.thread_get_pending", {
+                "agent_name": "arquitecto",
+            })
+            assert isinstance(result, list)
+
+        anyio.run(run)

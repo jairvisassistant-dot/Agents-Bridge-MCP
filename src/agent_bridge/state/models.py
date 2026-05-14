@@ -96,9 +96,10 @@ class Message(BaseModel):
 
     id: str
     thread_id: str | None = None
-    sender: str  # human, arquitecto, desarrollador
+    sender: str  # human, arquitecto, desarrollador, system
     target: str | None = None  # @mention
     text: str
+    turn_number: int | None = None  # turn index in threaded discussions
     created_at: datetime | None = None
 
 
@@ -108,9 +109,12 @@ ThreadStatus = Literal["open", "resolved"]
 
 
 class Thread(BaseModel):
-    """A discussion thread with a title."""
+    """A discussion thread with participants, turn tracking, and timeout."""
 
     id: str
     title: str
     status: ThreadStatus = "open"
+    participants: list[str] = []  # JSON array; empty = public (no turn-taking)
+    current_turn: str | None = None  # agent_name who should speak next
+    last_activity_at: datetime | None = None
     created_at: datetime | None = None
