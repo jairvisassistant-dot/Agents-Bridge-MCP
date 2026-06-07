@@ -564,3 +564,45 @@ class TestMaintenanceLoop:
             assert mod._maintenance_scopes.get(db_path) is not None
 
         anyio.run(run)
+
+    def test_maintenance_scope_per_instance(self):
+        """Two create_server calls with different db_paths should have separate scopes."""
+        import tempfile
+        from pathlib import Path
+
+        db_path_a = None
+        db_path_b = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                db_path_a = f.name
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                db_path_b = f.name
+
+            async def run():
+                from agent_bridge.server import create_server
+                from agent_bridge import server as mod
+
+                # Reset the dict for clean test state
+                mod._maintenance_scopes.clear()
+
+                server_a, init_a = create_server(db_path=db_path_a, dry_run=True)
+                await init_a()
+
+                server_b, init_b = create_server(db_path=db_path_b, dry_run=True)
+                await init_b()
+
+                # Both db_paths should have their own scope
+                scope_a = mod._maintenance_scopes.get(db_path_a)
+                scope_b = mod._maintenance_scopes.get(db_path_b)
+                assert scope_a is not None, f"Missing scope for {db_path_a}"
+                assert scope_b is not None, f"Missing scope for {db_path_b}"
+                # They must be different CancelScope instances
+                assert scope_a is not scope_b, "Instances must have separate scopes"
+
+            anyio.run(run)
+        finally:
+            for p in (db_path_a, db_path_b):
+                if p:
+                    Path(p).unlink(missing_ok=True)
+                    Path(p + "-wal").unlink(missing_ok=True)
+                    Path(p + "-shm").unlink(missing_ok=True)

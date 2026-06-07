@@ -44,6 +44,20 @@ class TestPlanTransitions:
         with pytest.raises(TransitionError):
             validate_plan_transition("completed", "planning")
 
+    def test_tasks_ready_to_archived(self):
+        validate_plan_transition("tasks_ready", "archived")
+
+    def test_in_progress_to_archived(self):
+        validate_plan_transition("in_progress", "archived")
+
+    def test_invalid_archived_to_anything(self):
+        with pytest.raises(TransitionError):
+            validate_plan_transition("archived", "idle")
+        with pytest.raises(TransitionError):
+            validate_plan_transition("archived", "planning")
+        with pytest.raises(TransitionError):
+            validate_plan_transition("archived", "tasks_ready")
+
     def test_all_states_covered(self):
         """Every plan status appears at least once in the transition map."""
         from agent_bridge.state.models import PlanStatus
@@ -139,10 +153,14 @@ class TestCanTransition:
     def test_valid(self):
         assert can_transition("task", "pending", "in_progress") is True
         assert can_transition("plan", "idle", "planning") is True
+        assert can_transition("plan", "tasks_ready", "archived") is True
+        assert can_transition("plan", "in_progress", "archived") is True
 
     def test_invalid(self):
         assert can_transition("task", "pending", "approved") is False
         assert can_transition("plan", "completed", "idle") is False
+        assert can_transition("plan", "archived", "idle") is False
+        assert can_transition("plan", "archived", "planning") is False
 
     def test_unknown_entity(self):
         assert can_transition("foo", "a", "b") is False
