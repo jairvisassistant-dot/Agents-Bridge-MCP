@@ -31,10 +31,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install uv
+        run: pip install uv
+
       - name: Install Python dependencies
         run: |
-          pip install -e .
-          pip install pyinstaller
+          uv pip install --system -e .
+          uv pip install --system pyinstaller
 
       - name: Bundle backend with PyInstaller
         run: bash build/bundle-backend.sh

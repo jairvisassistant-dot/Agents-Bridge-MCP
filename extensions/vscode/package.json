@@ -175,6 +175,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts",
+    "bundle": "bash ../../build/bundle-backend.sh",
+    "build": "npm run bundle && npm run compile && npm run package",
     "package": "vsce package"
   },
   "devDependencies": {
