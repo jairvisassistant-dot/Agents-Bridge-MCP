@@ -2,15 +2,13 @@
 
 Provides:
 - KanbanTUI: main Textual app with task kanban board
-- ChatPanel: persistent chat widget (replaces ChatOverlay)
-- ChatOverlay: legacy modal chat overlay (to be removed in Phase 2)
+- ChatPanel: persistent chat widget (replaced legacy ChatOverlay)
 - KanbanBoard: widget showing tasks grouped by status
 - TuiBridge: in-process Database wrapper for the UI
 - DBWatcher: background poller for external DB changes
 """
 
 from agent_bridge.ui.assign_task_modal import AssignTaskModal
-from agent_bridge.ui.chat_overlay import ChatOverlay
 from agent_bridge.ui.chat_panel import ChatPanel
 from agent_bridge.ui.create_task_modal import CreateTaskModal
 from agent_bridge.ui.db_watcher import DBWatcher
@@ -24,7 +22,6 @@ __all__ = [
     "AssignTaskModal",
     "KanbanTUI",
     "ChatPanel",
-    "ChatOverlay",
     "CreateTaskModal",
     "EditTaskModal",
     "MoveTaskModal",

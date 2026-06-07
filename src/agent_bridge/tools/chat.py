@@ -458,10 +458,8 @@ async def _send_message(db: Database, args: dict) -> list[types.TextContent]:
             ]
 
     # ── @mention presence routing ──────────────────────────────────
-    # Design: deliver message + warning instead of rejecting.
-    # The agent sees queued messages when they come back online.
-    # This is intentional — rejecting would lose the message entirely.
-    warning = None
+    # PROD-04: reject message + register pending mention for auto-delivery
+    # when the agent reconnects.
     if target in TARGET_ROLE_MAP:
         role = TARGET_ROLE_MAP[target]
         online = await db.execute_one(
@@ -469,22 +467,72 @@ async def _send_message(db: Database, args: dict) -> list[types.TextContent]:
             (role,),
         )
         if online is None:
+            # Register the pending mention for auto-delivery on reconnect
+            await db.add_pending_mention(role, sender, text, thread_id)
+
+            # Diagnose: platform vs agent problem
             any_agent = await db.execute_one(
                 "SELECT status, last_seen FROM agents WHERE role = ? LIMIT 1",
                 (role,),
             )
-            if any_agent:
+
+            # Check if ANY agents are online (platform health)
+            any_online = await db.execute_one(
+                "SELECT 1 FROM agents WHERE status IN ('online', 'busy') LIMIT 1",
+            )
+
+            if any_agent is None:
+                error = (
+                    f"El agente '{target}' no está registrado en el sistema. "
+                    "Verificá la configuración en bridge.json y asegurate de "
+                    "que el agente esté corriendo con AGENT_BRIDGE_ID correcto. "
+                    "El mensaje quedó pendiente y se entregará automáticamente "
+                    "cuando el agente se conecte."
+                )
+            else:
                 status = any_agent["status"]
                 last_seen = _format_timestamp(any_agent["last_seen"])
-                warning = f"El {target} está {status} desde las {last_seen}. El mensaje quedó en su inbox."
-            else:
-                warning = f"El {target} no está registrado. El mensaje quedó en su inbox."
+                if status == "offline":
+                    base = (
+                        f"El agente '{target}' está desconectado desde las {last_seen}."
+                    )
+                elif status == "away":
+                    base = (
+                        f"El agente '{target}' está ausente desde las {last_seen}."
+                    )
+                else:
+                    base = f"El agente '{target}' no está disponible ({status})."
+
+                if any_online:
+                    diag = (
+                        " Otros agentes están conectados — el problema es específico de "
+                        f"'{target}'. Revisá su terminal y asegurate de que el proceso "
+                        "del agente esté corriendo."
+                    )
+                else:
+                    diag = (
+                        " No hay ningún agente conectado — puede haber un problema de "
+                        "plataforma. Verificá que el servidor SSE esté funcionando "
+                        "y que los agentes estén configurados correctamente."
+                    )
+                error = base + diag
+
+            error += (
+                f" El mensaje quedó registrado y se entregará automáticamente "
+                f"cuando {target} se reconecte."
+            )
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps({"error": "agent_not_available", "detail": error}),
+            )]
+
+    # PROD-02: notify in-process listeners for immediate TUI refresh
+    db.signal_new_message()
 
     logger.info("Message from %s: %s", sender, text[:60])
 
     response: dict[str, str] = {"message_id": msg_id}
-    if warning:
-        response["warning"] = warning
     if turn_number is not None:
         response["turn_number"] = turn_number
 

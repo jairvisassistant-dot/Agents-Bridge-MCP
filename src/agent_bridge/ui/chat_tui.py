@@ -9,10 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from rich.markup import escape as rich_escape
@@ -523,14 +522,13 @@ class ChatTUI(App):
     @staticmethod
     def _format_time(iso_str: str) -> str:
         """Format ISO timestamp to HH:MM in local time."""
-        from datetime import timezone
 
         if not iso_str:
             return ""
         try:
             dt = datetime.fromisoformat(iso_str)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             dt = dt.astimezone()
             return dt.strftime("%H:%M")
         except (ValueError, TypeError):

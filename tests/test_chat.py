@@ -89,8 +89,8 @@ class TestChatSystem:
 
     # ── @mention presence routing ────────────────────────────────
 
-    def test_mention_arquitecto_offline_warning(self, db_path):
-        """Mentioning an unregistered architect returns a warning."""
+    def test_mention_arquitecto_offline_rejected(self, db_path):
+        """Mentioning an unregistered architect is rejected with diagnosis."""
         async def run():
             server, init = create_server(db_path=db_path, agent_id="test-chat")
             await init()
@@ -100,15 +100,15 @@ class TestChatSystem:
                 "sender": "human",
                 "target": "arquitecto",
             })
-            assert "message_id" in result
-            assert "warning" in result
-            assert "arquitecto" in result["warning"].lower()
-            assert "registrado" in result["warning"] or "offline" in result["warning"]
+            assert "error" in result
+            assert result["error"] == "agent_not_available"
+            assert "detail" in result
+            assert "arquitecto" in result["detail"].lower()
 
         anyio.run(run)
 
-    def test_mention_desarrollador_offline_warning(self, db_path):
-        """Mentioning an unregistered developer returns a warning."""
+    def test_mention_desarrollador_offline_rejected(self, db_path):
+        """Mentioning an unregistered developer is rejected with diagnosis."""
         async def run():
             server, init = create_server(db_path=db_path, agent_id="test-chat")
             await init()
@@ -118,9 +118,10 @@ class TestChatSystem:
                 "sender": "human",
                 "target": "desarrollador",
             })
-            assert "message_id" in result
-            assert "warning" in result
-            assert "desarrollador" in result["warning"].lower()
+            assert "error" in result
+            assert result["error"] == "agent_not_available"
+            assert "detail" in result
+            assert "desarrollador" in result["detail"].lower()
 
         anyio.run(run)
 
@@ -172,7 +173,7 @@ class TestChatSystem:
         anyio.run(run)
 
     def test_mention_arquitecto_offline_agent_registered(self, db_path):
-        """Mentioning an architect that exists but is offline gives a warning."""
+        """Mentioning an architect that exists but is offline is rejected."""
         async def run():
             server, init = create_server(db_path=db_path, agent_id="test-arch")
             await init()
@@ -189,13 +190,14 @@ class TestChatSystem:
             })
 
             result = await self._call(server, "chat.send", {
-                "text": "Revisá esto",
+                "text": "Revisá la tarea #5",
                 "sender": "human",
                 "target": "arquitecto",
             })
-            assert "message_id" in result
-            assert "warning" in result
-            assert "offline" in result["warning"].lower() or "inbox" in result["warning"].lower()
+            assert "error" in result, (
+                f"Expected error for offline architect, got: {result}"
+            )
+            assert result["error"] == "agent_not_available"
 
         anyio.run(run)
 
@@ -1634,16 +1636,15 @@ class TestEnhancedMessaging:
             server, init = create_server(db_path=db_path, agent_id="test-chat")
             await init()
 
-            # Send a message
+            # Send a general message (no @mention to avoid PROD-04 rejection)
             send = await self._call(server, "chat.send", {
                 "text": "mensaje de prueba",
                 "sender": "human",
-                "target": "desarrollador",
             })
             msg_id = send["message_id"]
 
             # Read normally — message should appear
-            msgs = await self._call(server, "chat.read", {"target": "desarrollador"})
+            msgs = await self._call(server, "chat.read", {})
             assert any(m["id"] == msg_id for m in msgs)
             target_msg = next(m for m in msgs if m["id"] == msg_id)
             assert target_msg["read"] is False
@@ -1654,7 +1655,7 @@ class TestEnhancedMessaging:
 
             # Verify — when filtering unread_only, it should not appear
             msgs = await self._call(server, "chat.read", {
-                "target": "desarrollador", "unread_only": True,
+                "unread_only": True,
             })
             assert not any(m["id"] == msg_id for m in msgs)
 

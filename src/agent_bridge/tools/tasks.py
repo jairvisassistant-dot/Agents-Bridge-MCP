@@ -9,7 +9,6 @@ import mcp.types as types
 
 from agent_bridge.state.database import Database
 
-
 logger = logging.getLogger(__name__)
 
 TASK_TOOLS = [
@@ -238,7 +237,7 @@ async def _claim_task(db: Database, args: dict) -> list[types.TextContent]:
                 type="text",
                 text=json.dumps({
                     "error": "max_concurrent_tasks_reached",
-                    "detail": f"Already at the maximum of {max_tasks} concurrent in_progress tasks. Complete or release one first.",
+                    "detail": f"Max {max_tasks} concurrent in_progress tasks. Complete or release one first.",
                 })
             )]
 
@@ -298,7 +297,7 @@ async def _claim_task(db: Database, args: dict) -> list[types.TextContent]:
         return [
             types.TextContent(
                 type="text",
-                text=json.dumps({"error": "cannot claim task — invalid transition, task not found, or already claimed"}),
+                text=json.dumps({"error": "cannot claim — invalid transition, task not found, or already claimed"}),
             )
         ]
 

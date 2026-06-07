@@ -261,14 +261,14 @@ def create_server(
             # Prefix-based dispatch (CODE-04/ARCH-03: dict routing + isolation)
             tool_prefix = name.split(".", 1)[0]
 
-            DOMAIN_DISPATCH: dict[str, Callable] = {
+            domain_dispatch: dict[str, Callable] = {
                 "plan": handle_plan_tool,
                 "task": handle_task_tool,
                 "review": handle_review_tool,
                 "chat": handle_chat_tool,
             }
 
-            handler = DOMAIN_DISPATCH.get(tool_prefix)
+            handler = domain_dispatch.get(tool_prefix)
             if handler is not None:
                 result = await handler(db, name, args)
                 if result is not None:

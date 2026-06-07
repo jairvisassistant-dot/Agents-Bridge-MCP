@@ -2,16 +2,11 @@
 
 import json
 import logging
-import sqlite3
 import uuid
 
 import mcp.types as types
 
 from agent_bridge.state.database import Database
-from agent_bridge.state.state_machine import (
-    TransitionError,
-    validate_task_transition,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -172,39 +167,20 @@ async def _approve_review(db: Database, args: dict) -> list[types.TextContent]:
                     })
                 )]
 
-    # Read current status FIRST and validate BEFORE transaction
-    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-    if row is None:
-        return [types.TextContent(type="text", text='{"error": "task not found"}')]
-
-    try:
-        validate_task_transition(row["status"], "approved")
-    except TransitionError as e:
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-    # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
-    def _do_approve(conn: sqlite3.Connection) -> int:
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND status = ?",
-            (task_id, row["status"]),
-        )
-        if cur.rowcount == 0:
-            return 0
-        conn.execute(
-            """UPDATE reviews SET status = 'approved', comment = ?
-               WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
-            (comment, task_id),
-        )
-        return cur.rowcount
-
-    affected = await db.with_transaction(_do_approve)
-
-    if affected == 0:
-        # Race condition: task status changed between SELECT and transaction
+    # Centralized guard: transition_task() validates + updates task atomically
+    ok = await db.transition_task(task_id, "approved")
+    if not ok:
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": "concurrent approve detected, task status changed"}),
+            text=json.dumps({"error": "cannot approve — task not found, invalid transition, or concurrent change"}),
         )]
+
+    # Update the review record (separate transaction — approved is terminal so no race)
+    await db.execute_write(
+        """UPDATE reviews SET status = 'approved', comment = ?
+           WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
+        (comment, task_id),
+    )
 
     logger.info("Task %s approved", task_id)
     # Notify chat
@@ -244,40 +220,20 @@ async def _request_changes(db: Database, args: dict) -> list[types.TextContent]:
     if cycle_error:
         return [types.TextContent(type="text", text=cycle_error)]
 
-    # Read current status FIRST and validate BEFORE transaction
-    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-    if row is None:
-        return [types.TextContent(type="text", text='{"error": "task not found"}')]
-
-    try:
-        validate_task_transition(row["status"], "changes_requested")
-    except TransitionError as e:
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-    # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
-    def _do_request_changes(conn: sqlite3.Connection) -> int:
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'changes_requested', updated_at = datetime('now') "
-            "WHERE id = ? AND status = ?",
-            (task_id, row["status"]),
-        )
-        if cur.rowcount == 0:
-            return 0
-        conn.execute(
-            """UPDATE reviews SET status = 'changes_requested', comment = ?
-               WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
-            (changes, task_id),
-        )
-        return cur.rowcount
-
-    affected = await db.with_transaction(_do_request_changes)
-
-    if affected == 0:
-        # Race condition: task status changed between SELECT and transaction
+    # Centralized guard: transition_task() validates + updates task atomically
+    ok = await db.transition_task(task_id, "changes_requested")
+    if not ok:
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": "concurrent change request detected, task status changed"}),
+            text=json.dumps({"error": "cannot request changes — task not found or concurrent change"}),
         )]
+
+    # Update the review record (separate transaction)
+    await db.execute_write(
+        """UPDATE reviews SET status = 'changes_requested', comment = ?
+           WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
+        (changes, task_id),
+    )
 
     logger.info("Changes requested for task %s: %s", task_id, changes)
     # Notify chat

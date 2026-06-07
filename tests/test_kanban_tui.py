@@ -13,7 +13,6 @@ import pytest
 from textual.widgets import Static
 
 from agent_bridge.state.database import Database
-from agent_bridge.ui.chat_overlay import ChatOverlay
 from agent_bridge.ui.db_watcher import DBWatcher
 from agent_bridge.ui.tui_bridge import TaskValidationError, TuiBridge
 
@@ -650,110 +649,15 @@ class TestDBWatcher:
 # ── Headless integration tests for KanbanTUI ────────────────────────────────
 
 
-class TestChatOverlayContextual:
-    """Direct tests for ChatOverlay contextual behaviour (no headless app)."""
 
-    def test_contextual_header_text(self):
-        """_build_header_text returns contextual text when task_context is set."""
-        bridge = TuiBridge(Database(":memory:"))
-        task = {"id": "t1", "title": "Fix login bug", "status": "in_progress"}
-        overlay = ChatOverlay(bridge, task_context=task)
-        header = overlay._build_header_text()
-        assert "Fix login bug" in header
-        assert "Tarea" in header
-
-    def test_general_header_text(self):
-        """_build_header_text returns general text when no task_context."""
-        bridge = TuiBridge(Database(":memory:"))
-        overlay = ChatOverlay(bridge, task_context=None)
-        header = overlay._build_header_text()
-        assert "Chat general" in header
-
-    def test_placeholder_with_assignee(self):
-        """_build_placeholder mentions assignee when task has one."""
-        bridge = TuiBridge(Database(":memory:"))
-        task = {"id": "t1", "title": "Task", "status": "pending", "assignee": "claude-code-main"}
-        overlay = ChatOverlay(bridge, task_context=task)
-        placeholder = overlay._build_placeholder()
-        assert "@Arq:" in placeholder
-
-    def test_placeholder_without_assignee(self):
-        """_build_placeholder shows default when no assignee."""
-        bridge = TuiBridge(Database(":memory:"))
-        task = {"id": "t1", "title": "Task", "status": "pending"}
-        overlay = ChatOverlay(bridge, task_context=task)
-        placeholder = overlay._build_placeholder()
-        assert "F1" in placeholder
-
-    def test_contextual_send_uses_thread_id(self, db_path):
-        """Messages sent via bridge with thread_id = task.id are stored correctly."""
-
-        async def run():
-            db = Database(db_path)
-            await db.initialize()
-            bridge = TuiBridge(db)
-
-            # Simulate what ChatOverlay._do_send does for contextual chat
-            task_id = "task-ctx-1"
-            thread_id = task_id  # ChatOverlay sets thread_id = task_context["id"]
-            await bridge.send_message(
-                text="Test message",
-                sender="human",
-                thread_id=thread_id,
-            )
-
-            msgs = await bridge.get_messages_for_task(task_id)
-            assert len(msgs) == 1
-            assert msgs[0]["text"] == "Test message"
-            assert msgs[0]["thread_id"] == task_id
-
-        anyio.run(run)
-
-    def test_general_send_uses_no_thread_id(self, db_path):
-        """Messages sent via bridge without thread_id have thread_id = None."""
-
-        async def run():
-            db = Database(db_path)
-            await db.initialize()
-            bridge = TuiBridge(db)
-
-            # Simulate what ChatOverlay._do_send does for general chat
-            await bridge.send_message(text="General message", sender="human")
-
-            msgs = await bridge.get_messages(limit=100)
-            msg = next((m for m in msgs if m["text"] == "General message"), None)
-            assert msg is not None
-            assert msg.get("thread_id") is None
-
-        anyio.run(run)
-
-    def test_contextual_fetch_filters_by_thread_id(self, db_path):
-        """get_messages_for_task returns only messages for the given task."""
-
-        async def run():
-            db = Database(db_path)
-            await db.initialize()
-            bridge = TuiBridge(db)
-
-            # Seed messages with different thread_ids
-            await bridge.send_message(text="Task msg", sender="human", thread_id="task-a")
-            await bridge.send_message(text="General", sender="human", thread_id=None)
-            await bridge.send_message(text="Other task", sender="human", thread_id="task-b")
-
-            task_a_msgs = await bridge.get_messages_for_task("task-a")
-            assert len(task_a_msgs) == 1
-            assert task_a_msgs[0]["text"] == "Task msg"
-            assert task_a_msgs[0]["thread_id"] == "task-a"
-
-        anyio.run(run)
 
 
 class TestKanbanTUIHeadless:
     """Headless integration tests for kanban TUI overlay navigation.
 
     These tests use Textual's run_test to verify real DOM interaction.
-    They do NOT test contextual task selection (timing-dependent across
-    async init); contextual behavior is covered by TestChatOverlayContextual.
+    Contextual behavior (thread_id filtering) is tested directly in the
+    TuiBridge message tests.
     """
 
     async def _setup_db(self, db_path: str, *, task_title: str = "Test Task", assignee: str | None = None) -> None:
@@ -1019,7 +923,7 @@ class TestKanbanTUIEdgeCases:
             bridge = TuiBridge(db)
 
             task_id = "task-verify-ctx"
-            # Simulate ChatOverlay._do_send behaviour
+            # Contextual chat: messages with thread_id are scoped to a task
             await bridge.send_message(
                 text="Contextual chat message",
                 sender="human",

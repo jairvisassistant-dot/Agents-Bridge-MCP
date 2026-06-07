@@ -1,10 +1,13 @@
 """ChatPanel — persistent chat widget for the Kanban TUI.
 
-Unifies chat_tui.py (status bar, agent indicators, @mentions, /commands,
-F1 help) with chat_overlay.py (contextual task awareness) into a single
-Widget that lives at the bottom of the kanban layout.
+Unifies chat_tui.py features (status bar, agent indicators, @mentions,
+/commands, F1 help) with contextual task awareness into a single Widget
+that lives at the bottom of the kanban layout.
 
 Uses TuiBridge (direct DB) — no MCP subprocess.
+
+Note: ChatOverlay (legacy modal chat) was removed in NEW-04 — ChatPanel
+is the only chat widget.
 """
 
 from __future__ import annotations
@@ -18,8 +21,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.suggester import Suggester
-from textual.widgets import Button, Input, RichLog, Static
 from textual.widget import Widget
+from textual.widgets import Button, Input, RichLog, Static
 
 from agent_bridge.ui.tui_bridge import TuiBridge
 
@@ -90,11 +93,11 @@ class ChatPanel(Widget):
 
     task_context: reactive[dict | None] = reactive(None, init=False)
     """When set to a task dict, chat switches to contextual mode for that task.
-    
+
     Set this from the kanban app whenever the selected task changes::
-    
+
         chat_panel.task_context = selected_task  # or None for general chat
-    
+
     The panel automatically clears its message cache and refetches.
     """
 
@@ -187,11 +190,13 @@ class ChatPanel(Widget):
     # ── Lifecycle ───────────────────────────────────────────────────
 
     async def on_mount(self) -> None:
-        """Start polling for messages and agent status."""
+        """Start polling for agent status (messages are notified in-process)."""
         # Initial status bar render (watchers have init=False)
         self._update_status_bar()
-        # Start polling
-        self.set_interval(5, self._poll)
+        # Start polling — 2s interval for agent status updates.
+        # New messages trigger immediate refresh via PROD-02 notification;
+        # the poll also catches any missed notifications (split-process mode).
+        self.set_interval(2, self._poll)
 
     # ── Reactive watchers ───────────────────────────────────────────
 
@@ -250,10 +255,11 @@ class ChatPanel(Widget):
                 )
                 parts.append(f"{icon} {short}")
 
-            if parts:
-                text = f"{mode}  |  {' · '.join(parts)}"
-            else:
-                text = f"{mode}  |  ⚫ (sin conexiones)"
+            text = (
+                f"{mode}  |  {' · '.join(parts)}"
+                if parts
+                else f"{mode}  |  ⚫ (sin conexiones)"
+            )
 
             self.query_one("#chat-status-bar", Static).update(text)
         except Exception as exc:
@@ -274,9 +280,17 @@ class ChatPanel(Widget):
     # ── Polling ─────────────────────────────────────────────────────
 
     async def _poll(self) -> None:
-        """Periodic poll for new messages and agent status."""
+        """Periodic poll for agent status + new messages.
+
+        New messages are normally pushed via PROD-02 in-process notification
+        (``Database.check_new_message()``).  This poll also catches any
+        messages missed during split-process mode (--ui-only + --headless)
+        where the notification doesn't cross process boundaries.
+        """
         try:
-            await self._fetch_messages()
+            # PROD-02: refresh immediately if a new message arrived
+            if self._bridge._db.check_new_message():
+                await self._fetch_messages()
             await self._fetch_agents()
         except Exception as exc:
             logger.warning("ChatPanel poll error: %s", exc)

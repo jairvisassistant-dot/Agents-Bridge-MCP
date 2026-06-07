@@ -12,6 +12,7 @@ skipped. A single cached :memory: connection is reused, so no
 persistent state is modified.
 """
 
+import collections
 import logging
 import sqlite3
 import threading
@@ -21,7 +22,7 @@ import anyio
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 7  # bump this when adding migrations below
+SCHEMA_VERSION = 8  # bump this when adding migrations below
 
 _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP")
 
@@ -105,6 +106,16 @@ CREATE TABLE IF NOT EXISTS ping_requests (
     latency_ms INTEGER,
     status TEXT NOT NULL DEFAULT 'pending'
 );
+
+CREATE TABLE IF NOT EXISTS pending_mentions (
+    id TEXT PRIMARY KEY,
+    target_role TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    text TEXT NOT NULL,
+    thread_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -162,9 +173,27 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN depends_on TEXT DEFAULT NULL")
         logger.info("Migration v6→v7: added depends_on to tasks (nullable FK to tasks.id)")
 
+    if from_version < 8:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS pending_mentions (
+                id TEXT PRIMARY KEY,
+                target_role TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                text TEXT NOT NULL,
+                thread_id TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                delivered INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        logger.info("Migration v7→v8: added pending_mentions table (PROD-04 recovery)")
+
 
 def _run_reverse_migrations(conn: sqlite3.Connection, from_version: int) -> None:
     """Run reverse migrations to downgrade schema version."""
+    if from_version >= 8:
+        conn.execute("DROP TABLE IF EXISTS pending_mentions")
+        logger.info("Reverse migration v8→v7: dropped pending_mentions table")
+
     if from_version >= 7:
         conn.execute("ALTER TABLE tasks DROP COLUMN depends_on")
         logger.info("Reverse migration v7→v6: dropped depends_on from tasks")
@@ -218,6 +247,32 @@ class Database:
         self._conn: sqlite3.Connection | None = None
         self._dry_run_conn: sqlite3.Connection | None = None
         self._lock = threading.RLock()
+        # PROD-02: in-process notification queue for new chat messages.
+        # append() is thread-safe under CPython's GIL; no lock needed.
+        self._message_queue: collections.deque[bool] = collections.deque(maxlen=100)
+
+    # ── In-process message notification (PROD-02) ──────────────
+    # Thread-safe: collections.deque is atomic under CPython GIL.
+
+    def signal_new_message(self) -> None:
+        """Notify in-process listeners that a new chat message was inserted.
+
+        Called from TuiBridge.send_message (human) and chat.py _send_message
+        (agent).  Safe to call from any thread.
+        """
+        self._message_queue.append(True)
+
+    def check_new_message(self) -> bool:
+        """Return True if a new message arrived since the last check.
+
+        Consumed by ChatPanel._poll and ChatTUI polling loops to trigger
+        an immediate refresh instead of waiting for the next full interval.
+        """
+        try:
+            self._message_queue.popleft()
+            return True
+        except IndexError:
+            return False
 
     # ── Sync helpers (run in thread via anyio) ─────────────────
 
@@ -433,7 +488,7 @@ class Database:
             except TransitionError:
                 return False
 
-            sets = f"status = ?, updated_at = datetime('now')"
+            sets = "status = ?, updated_at = datetime('now')"
             if extra_sets:
                 sets += ", " + extra_sets
 
@@ -546,32 +601,33 @@ class Database:
     async def import_plan(self, plan_data: dict) -> dict:
         """Import a plan with its tasks and reviews (INSERT OR IGNORE)."""
 
-        from agent_bridge.state.models import PlanStatus, TaskStatus, ReviewStatus
         from typing import get_args
 
-        VALID_PLAN_STATUSES: set[str] = set(get_args(PlanStatus))
-        VALID_TASK_STATUSES: set[str] = set(get_args(TaskStatus))
-        VALID_REVIEW_STATUSES: set[str] = set(get_args(ReviewStatus))
+        from agent_bridge.state.models import PlanStatus, ReviewStatus, TaskStatus
+
+        valid_plan_statuses: set[str] = set(get_args(PlanStatus))
+        valid_task_statuses: set[str] = set(get_args(TaskStatus))
+        valid_review_statuses: set[str] = set(get_args(ReviewStatus))
 
         plan = plan_data.get("plan", {})
         plan_status = plan.get("status", "idle")
-        if plan_status not in VALID_PLAN_STATUSES:
-            raise ValueError(f"Invalid plan status: '{plan_status}'. Valid values: {sorted(VALID_PLAN_STATUSES)}")
+        if plan_status not in valid_plan_statuses:
+            raise ValueError(f"Invalid plan status: '{plan_status}'. Valid values: {sorted(valid_plan_statuses)}")
 
         for i, task in enumerate(plan_data.get("tasks", [])):
             task_status = task.get("status", "pending")
-            if task_status not in VALID_TASK_STATUSES:
+            if task_status not in valid_task_statuses:
                 raise ValueError(
                     f"Invalid task status: '{task_status}' at index {i}. "
-                    f"Valid values: {sorted(VALID_TASK_STATUSES)}"
+                    f"Valid values: {sorted(valid_task_statuses)}"
                 )
 
         for i, review in enumerate(plan_data.get("reviews", [])):
             review_status = review.get("status", "pending")
-            if review_status not in VALID_REVIEW_STATUSES:
+            if review_status not in valid_review_statuses:
                 raise ValueError(
                     f"Invalid review status: '{review_status}' at index {i}. "
-                    f"Valid values: {sorted(VALID_REVIEW_STATUSES)}"
+                    f"Valid values: {sorted(valid_review_statuses)}"
                 )
 
         def _import():
@@ -765,6 +821,80 @@ class Database:
             "INSERT INTO messages (id, sender, target, text, msg_type, priority) VALUES (?, ?, ?, ?, ?, ?)",
             (msg_id, "system", target, text, msg_type, priority),
         )
+
+    # ── Pending mentions (PROD-04 recovery) ─────────────────────
+
+    async def add_pending_mention(
+        self,
+        target_role: str,
+        sender: str,
+        text: str,
+        thread_id: str | None = None,
+    ) -> str:
+        """Register an @mention that was rejected because the agent was offline.
+
+        Returns the pending mention ID. The mention will be auto-delivered
+        when the agent reconnects (see :meth:`deliver_pending_mentions`).
+        """
+        mention_id = str(uuid.uuid4())
+        await self.execute_write(
+            "INSERT INTO pending_mentions (id, target_role, sender, text, thread_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (mention_id, target_role, sender, text, thread_id),
+        )
+        logger.info("Registered pending mention %s for role %s", mention_id, target_role)
+        return mention_id
+
+    async def get_pending_mentions_for_role(self, role: str) -> list[dict]:
+        """Return all undelivered pending mentions for a given role."""
+        rows = await self.execute(
+            "SELECT * FROM pending_mentions WHERE target_role = ? AND delivered = 0 "
+            "ORDER BY created_at ASC",
+            (role,),
+        )
+        return [dict(r) for r in rows]
+
+    async def deliver_pending_mentions(self, role: str) -> list[dict]:
+        """Deliver ALL pending mentions for a role and mark them as delivered.
+
+        Each pending mention is inserted as a chat message from the original
+        sender. Returns the list of delivered mention dicts so the caller can
+        notify the original senders.
+
+        Uses with_transaction so delivery + mark are atomic.
+        """
+
+        def _do_deliver(conn: sqlite3.Connection) -> list[dict]:
+            rows = conn.execute(
+                "SELECT * FROM pending_mentions WHERE target_role = ? AND delivered = 0 "
+                "ORDER BY created_at ASC",
+                (role,),
+            ).fetchall()
+            if not rows:
+                return []
+
+            delivered = []
+            for row in rows:
+                r = dict(row)
+                conn.execute(
+                    "INSERT INTO messages (id, thread_id, sender, text) VALUES (?, ?, ?, ?)",
+                    (str(uuid.uuid4()), r["thread_id"], r["sender"], r["text"]),
+                )
+                conn.execute(
+                    "UPDATE pending_mentions SET delivered = 1 WHERE id = ?",
+                    (r["id"],),
+                )
+                delivered.append(r)
+            return delivered
+
+        return await self.with_transaction(_do_deliver)
+
+    async def count_pending_mentions(self) -> int:
+        """Return total count of undelivered pending mentions."""
+        row = await self.execute_one(
+            "SELECT COUNT(*) AS cnt FROM pending_mentions WHERE delivered = 0",
+        )
+        return row["cnt"] if row else 0
 
     async def get_unread_count(self, target: str) -> int:
         """Get count of unread messages for a target agent."""

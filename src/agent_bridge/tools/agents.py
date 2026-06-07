@@ -211,6 +211,12 @@ async def _heartbeat(db: Database, config: BridgeConfig, args: dict) -> list[typ
 
     now = datetime.now(UTC).isoformat()
 
+    # Read previous status BEFORE upsert (PROD-04: detect offline→online transition)
+    prev = await db.execute_one(
+        "SELECT status FROM agents WHERE agent_id = ?", (agent_id,)
+    )
+    prev_status = prev["status"] if prev else None
+
     await db.execute(
         """INSERT INTO agents (agent_id, role, status, last_seen, connected_since, metadata)
            VALUES (?, ?, ?, ?,
@@ -224,6 +230,33 @@ async def _heartbeat(db: Database, config: BridgeConfig, args: dict) -> list[typ
            """,
         (agent_id, role, status, now, agent_id, now),
     )
+
+    # ── Auto-deliver pending mentions on reconnect (PROD-04) ─────
+    if status in ("online", "busy") and prev_status in ("offline", "away", None):
+        role_map_reverse = {"architect": "arquitecto", "developer": "desarrollador"}
+        target_name = role_map_reverse.get(role, role)
+        delivered = await db.deliver_pending_mentions(role)
+        if delivered:
+            n = len(delivered)
+            # Notify the human that messages were delivered
+            await db.notify_chat(
+                f"📨 {n} mensaje{'s' if n > 1 else ''} pendiente{'s' if n > 1 else ''} "
+                f"para @{target_name} entregado{'s' if n > 1 else ''} "
+                f"automáticamente al reconectarse.",
+                sender="system",
+            )
+            # Notify the agent
+            await db.send_system_notification(
+                target=target_name,
+                text=f"Tenés {n} mensaje{'s' if n > 1 else ''} pendiente{'s' if n > 1 else ''} "
+                     f"que fueron entregados automáticamente mientras estabas desconectado.",
+                msg_type="status_update",
+                priority="high",
+            )
+            logger.info(
+                "Delivered %d pending mention(s) for role %s (agent %s reconnected)",
+                n, role, agent_id,
+            )
 
     skill = config.get_skill_for_role(role)
 

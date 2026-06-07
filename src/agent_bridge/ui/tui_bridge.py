@@ -7,7 +7,7 @@ All operations are async via anyio.to_thread.run_sync on the Database.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from agent_bridge.state.database import Database
@@ -58,31 +58,16 @@ class TuiBridge:
         return counts
 
     async def move_task(self, task_id: str, new_status: str) -> bool:
-        """Change a task's status. Uses state machine validation.
+        """Change a task's status via the centralized guard.
 
-        Returns True if the update was applied, False if the transition
-        is not allowed (terminal state, invalid transition) or the task
-        was not found.
-        Validates atomically inside with_transaction so a concurrent
-        status change cannot bypass the state machine check.
+        Delegates to ``Database.transition_task()`` which validates the
+        state machine transition and applies it atomically with
+        optimistic locking.
+
+        Returns:
+            True if the transition was applied, False otherwise.
         """
-        from agent_bridge.state.state_machine import can_transition
-
-        def _do_move(conn):
-            cur = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,))
-            row = cur.fetchone()
-            if row is None:
-                return False
-            current = row["status"]
-            if not can_transition("task", current, new_status):
-                return False
-            cur = conn.execute(
-                "UPDATE tasks SET status = ?, updated_at = datetime('now') WHERE id = ? AND status = ?",
-                (new_status, task_id, current),
-            )
-            return cur.rowcount > 0
-
-        return await self._db.with_transaction(_do_move)
+        return await self._db.transition_task(task_id, new_status)
 
     async def create_task(
         self,
@@ -272,6 +257,8 @@ class TuiBridge:
             "INSERT INTO messages (id, sender, target, text, thread_id) VALUES (?, ?, ?, ?, ?)",
             (msg_id, sender, target, text, thread_id),
         )
+        # PROD-02: wake up in-process listeners for immediate refresh
+        self._db.signal_new_message()
         return msg_id
 
     async def get_messages(
@@ -327,14 +314,13 @@ class TuiBridge:
     @staticmethod
     def _format_time(iso_str: str) -> str:
         """Format ISO timestamp to HH:MM in local time."""
-        from datetime import timezone
 
         if not iso_str:
             return ""
         try:
             dt = datetime.fromisoformat(iso_str)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             dt = dt.astimezone()
             return dt.strftime("%H:%M")
         except (ValueError, TypeError):

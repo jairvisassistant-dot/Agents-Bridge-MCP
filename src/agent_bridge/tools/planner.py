@@ -281,7 +281,7 @@ async def _archive_plan(db: Database, args: dict) -> list[types.TextContent]:
             text=json.dumps({"error": str(e)})
         )]
 
-    await db.execute(
+    await db.execute_write(
         "UPDATE plans SET status = 'archived', updated_at = datetime('now') WHERE id = ?",
         (plan_id,),
     )
