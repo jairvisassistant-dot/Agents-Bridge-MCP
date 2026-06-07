@@ -11,9 +11,9 @@ from pathlib import Path
 
 import anyio
 
+from agent_bridge.config import BridgeConfig
 from agent_bridge.server import create_server
 from agent_bridge.state.database import Database
-from agent_bridge.config import BridgeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +27,12 @@ def _handle_start(args: argparse.Namespace) -> None:
     # ── UI-only mode: just launch the TUI ──────────────────────────
     if args.ui_only:
         logger.info("Starting TUI only (connecting to existing server on port %d)", port)
-        from agent_bridge.ui.chat_tui import main as tui_main
-        tui_main(db_path=db_path)
+        if getattr(args, "kanban", False):
+            from agent_bridge.ui.kanban_tui import main as tui_main
+        else:
+            from agent_bridge.ui.chat_tui import main as tui_main
+
+        tui_main(db_path=db_path, dry_run=dry_run)
         return
 
     # ── Headless mode: just launch SSE server ──────────────────────
@@ -40,27 +44,38 @@ def _handle_start(args: argparse.Namespace) -> None:
     # ── Default: SSE server in subprocess + TUI in this process ───
     logger.info("Starting Agent Bridge (SSE on port %d + TUI)", port)
     cmd = [
-        sys.executable, "-m", "agent_bridge",
-        "--db-path", db_path,
-        "--transport", "sse",
-        "--host", "127.0.0.1",
-        "--port", str(port),
+        sys.executable,
+        "-m",
+        "agent_bridge",
+        "--db-path",
+        db_path,
+        "--transport",
+        "sse",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
     ]
     if dry_run:
         cmd.append("--dry-run")
     sse_proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
 
     # Wait briefly for the SSE server to start
     import time
+
     time.sleep(1)
 
     try:
-        from agent_bridge.ui.chat_tui import main as tui_main
-        tui_main(db_path=db_path)
+        if getattr(args, "kanban", False):
+            from agent_bridge.ui.kanban_tui import main as tui_main
+        else:
+            from agent_bridge.ui.chat_tui import main as tui_main
+
+        tui_main(db_path=db_path, dry_run=dry_run)
     finally:
         logger.info("Shutting down SSE server (PID %d)", sse_proc.pid)
         sse_proc.terminate()
@@ -80,31 +95,30 @@ def _run_sse_server(
     dry_run: bool = False,
 ) -> None:
     """Run the MCP server in SSE mode in the current process.
-    
+
     Two calling conventions:
       1. _run_sse_server(db_path=..., host=..., port=...)  — creates server internally
       2. _run_sse_server(host=..., port=..., server=server, init_db=init_db) — uses existing
     """
     if server is None or init_db is None:
         from agent_bridge.server import create_server
+
         server, init_db = create_server(
             db_path=db_path or "bridge.db",
             agent_id=os.environ.get("AGENT_BRIDGE_ID"),
             dry_run=dry_run,
         )
 
+    import uvicorn
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
-    import uvicorn
 
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request):
         await init_db()
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as streams:
+        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
             await server.run(
                 streams[0],
                 streams[1],
@@ -170,6 +184,15 @@ Ejecutar cuando el humano invoque `@dev.Skill`. Conecta esta terminal al Agent B
 - **Threads**: para conversaciones de más de 2 intercambios con el arquitecto, usar `chat.thread_create`.
 - **Reportar al iniciar**: cuando tomás una tarea, avisarlo en TUI.
 - **Reportar al finalizar**: usar el Formato de reporte de finalización antes de cualquier otra cosa.
+
+### Protocolo de respuesta a ping
+
+Cuando `chat.read` retorne mensajes, revisar si alguno tiene `text` que sea JSON con `"type": "ping"`:
+
+1. Parsear el `ping_id`
+2. Llamar inmediatamente: `agent.pong(ping_id="{ping_id}")`
+3. NO publicar en el chat — el pong va directo a la DB
+4. Continuar con el procesamiento normal
 
 ### Formato de reporte al tomar una tarea
 
@@ -381,6 +404,15 @@ Ejecutar cuando el humano invoque `@architect.Skill`. Conecta esta terminal al A
 - **Notificar al dev**: toda tarea nueva o actualizada se notifica con `@desarrollador` + ID de referencia.
 - **Threads**: para conversaciones bilaterales de más de 2 intercambios con el dev, usar `chat.thread_create`.
 
+### Protocolo de respuesta a ping
+
+Cuando `chat.read` retorne mensajes, revisar si alguno tiene `text` que sea JSON con `"type": "ping"`:
+
+1. Parsear el `ping_id`
+2. Llamar inmediatamente: `agent.pong(ping_id="{ping_id}")`
+3. NO publicar en el chat — el pong va directo a la DB
+4. Continuar con el procesamiento normal
+
 ### Formato de referencia en TUI (planes y tareas)
 
 Nunca volcar el contenido completo en el chat. Usar este formato:
@@ -559,10 +591,10 @@ def _handle_init(args: argparse.Namespace) -> None:
     # ── 1. bridge.json ─────────────────────────────────────────
     bridge_path = target / "bridge.json"
     if bridge_path.exists():
-        print(f"  ✓ bridge.json ya existe")
+        print("  ✓ bridge.json ya existe")
     else:
         BridgeConfig.init_default_config(bridge_path)
-        print(f"  ✅ Creado bridge.json")
+        print("  ✅ Creado bridge.json")
 
     # ── 2. .agentes/ skills ────────────────────────────────────
     agentes_dir = target / ".agentes"
@@ -582,7 +614,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     agent_bridge_cmd = shutil.which("agent-bridge")
     if agent_bridge_cmd is None:
         print("  ⚠ agent-bridge no está instalado globalmente.")
-        print(f"     ¿Querés instalarlo ahora?")
+        print("     ¿Querés instalarlo ahora?")
         try:
             resp = input("     Instalar globalmente? [y/N] ")
         except (EOFError, OSError):
@@ -590,7 +622,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         if resp.lower() in ("y", "yes"):
             result = subprocess.run(
                 ["uv", "tool", "install", "--editable", str(agent_bridge_src)],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if result.returncode == 0:
                 print("  ✅ agent-bridge instalado globalmente")
@@ -611,22 +644,21 @@ def _handle_init(args: argparse.Namespace) -> None:
             except (EOFError, OSError):
                 resp = "n"
             if resp.lower() in ("y", "yes"):
-                pyproject.write_text(
-                    '[project]\nname = "my-project"\nversion = "0.1.0"\n'
-                    'requires-python = ">=3.12"\n'
-                )
+                pyproject.write_text('[project]\nname = "my-project"\nversion = "0.1.0"\nrequires-python = ">=3.12"\n')
                 print("  ✅ Creado pyproject.toml")
             else:
                 pyproject = None  # skip
 
         if pyproject and pyproject.exists():
-            print(f"  📦 Instalando agent-bridge como dependencia de desarrollo...")
+            print("  📦 Instalando agent-bridge como dependencia de desarrollo...")
             result = subprocess.run(
                 ["uv", "add", "--dev", "--editable", str(agent_bridge_src)],
-                cwd=target, capture_output=True, text=True,
+                cwd=target,
+                capture_output=True,
+                text=True,
             )
             if result.returncode == 0:
-                print(f"  ✅ agent-bridge agregado como dev dependency")
+                print("  ✅ agent-bridge agregado como dev dependency")
             else:
                 print(f"  ⚠ Error: {result.stderr.strip()}")
                 print("  📦 Podés intentar manualmente:")
@@ -639,7 +671,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     try:
         result = subprocess.run(
             ["agent-bridge", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         if result.returncode == 0:
             print(f"  ✅ {result.stdout.strip() or 'agent-bridge funciona correctamente'}")
@@ -672,10 +706,7 @@ def _handle_init(args: argparse.Namespace) -> None:
 def _handle_reset(args: argparse.Namespace) -> None:
     """Drop all tables and recreate the schema."""
     if not args.force:
-        response = input(
-            "¿Estás seguro? Esto borrará TODOS los datos "
-            "(planes, tareas, mensajes). [y/N] "
-        )
+        response = input("¿Estás seguro? Esto borrará TODOS los datos (planes, tareas, mensajes). [y/N] ")
         if response.lower() not in ("y", "yes"):
             print("Cancelado.")
             return
@@ -694,6 +725,7 @@ def _handle_reset(args: argparse.Namespace) -> None:
 
 def _handle_export(args: argparse.Namespace) -> None:
     """Export a plan with its tasks and reviews to stdout or file."""
+
     async def _do_export():
         db = Database(args.db_path)
         await db.initialize()
@@ -717,24 +749,137 @@ def _handle_export(args: argparse.Namespace) -> None:
 
 def _handle_import(args: argparse.Namespace) -> None:
     """Import a plan from a JSON file."""
+
     async def _do_import():
         with open(args.file) as f:
             plan_data = json.load(f)
         db = Database(args.db_path)
         await db.initialize()
         result = await db.import_plan(plan_data)
-        print(
-            f"Imported plan {result['plan_id']} "
-            f"with {result['tasks_count']} tasks"
-        )
+        print(f"Imported plan {result['plan_id']} with {result['tasks_count']} tasks")
 
     anyio.run(_do_import)
 
 
+# ── Configure subcommand ────────────────────────────────────────────
+
+
+def _resolve_config_path() -> Path:
+    """Find the bridge.json path for writing (mirrors BridgeConfig.load() search)."""
+    env_path = os.environ.get("AGENT_BRIDGE_CONFIG")
+    if env_path:
+        return Path(env_path)
+    for p in [
+        Path.cwd() / "bridge.json",
+        Path.home() / ".config" / "agent-bridge" / "bridge.json",
+        Path.home() / ".agent-bridge.json",
+    ]:
+        if p.exists():
+            return p
+    return Path.cwd() / "bridge.json"
+
+
+def _show_config(config: BridgeConfig) -> None:
+    """Display current configuration."""
+    config_path = _resolve_config_path()
+    print(f"Configuration: {config_path}")
+    print()
+
+    print("Agents:")
+    if config.agents:
+        for a in config.agents:
+            aid = a.get("id", "?")
+            role = a.get("role", "default")
+            name = a.get("name", "")
+            label = f"  ({name})" if name else ""
+            print(f"  • {aid} → {role} {label}")
+    else:
+        print("  (none)")
+    print()
+
+    print("Settings:")
+    if config.settings:
+        for k, v in config.settings.items():
+            print(f"  • {k}: {v}")
+    else:
+        print("  (none)")
+    print()
+
+    print("Skills:")
+    for s in config.list_skills():
+        print(f"  • {s['name']:12s} — {s['description']}")
+
+
+def _apply_config_changes(pairs: list[str]) -> None:
+    """Apply --set changes to bridge.json."""
+    agent_id = None
+    new_role = None
+    settings_map: dict[str, str] = {}
+
+    for val in pairs:
+        if val.startswith("agent="):
+            agent_id = val.split("=", 1)[1]
+        elif val.startswith("role="):
+            new_role = val.split("=", 1)[1]
+        elif "=" in val:
+            k, v = val.split("=", 1)
+            settings_map[k] = v
+
+    config_path = _resolve_config_path()
+    if config_path.exists():
+        with open(config_path) as f:
+            data = json.load(f)
+    else:
+        data = {"version": 1, "agents": [], "settings": {}}
+
+    if agent_id and new_role:
+        found = False
+        for agent in data.setdefault("agents", []):
+            if agent.get("id") == agent_id:
+                agent["role"] = new_role
+                found = True
+                break
+        if not found:
+            data["agents"].append({"id": agent_id, "role": new_role})
+        print(f"  ✓ Agent '{agent_id}' → role '{new_role}'")
+    elif agent_id and not new_role:
+        print("⚠️  --set agent=<id> requires role=<role>")
+        return
+    elif new_role and not agent_id:
+        print("⚠️  --set role=<role> requires agent=<id>")
+        return
+
+    for k, v in settings_map.items():
+        data.setdefault("settings", {})[k] = v
+        print(f"  ✓ Setting '{k}' → '{v}'")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"\n✅ Configuration saved to {config_path}")
+
+
+def _handle_configure(args: argparse.Namespace) -> None:
+    """Handle the `configure` subcommand: view or modify bridge.json."""
+
+    # --init: create default config
+    if args.init:
+        path = BridgeConfig.init_default_config()
+        print(f"✅ Default configuration created at {path}")
+        return
+
+    # --set: modify configuration values
+    if args.set:
+        _apply_config_changes(args.set)
+        return
+
+    # Default / --list: show current configuration
+    config = BridgeConfig.load()
+    _show_config(config)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Agent Bridge — MCP Broker for multi-agent collaboration"
-    )
+    parser = argparse.ArgumentParser(description="Agent Bridge — MCP Broker for multi-agent collaboration")
 
     # ── Subcommands ────────────────────────────────────────────────
     subparsers = parser.add_subparsers(dest="command")
@@ -780,6 +925,11 @@ def main() -> None:
         help="Start only the TUI (connect to existing SSE server)",
     )
     start_parser.add_argument(
+        "--kanban",
+        action="store_true",
+        help="Use the kanban TUI instead of the chat TUI",
+    )
+    start_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Start in dry-run mode (in-memory DB, no writes to disk)",
@@ -814,8 +964,30 @@ def main() -> None:
         help="Path to SQLite database file (default: bridge.db)",
     )
     export_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         help="Output file path (default: stdout)",
+    )
+
+    kanban_parser = subparsers.add_parser(
+        "kanban",
+        help="Launch kanban TUI + SSE server in one command",
+    )
+    kanban_parser.add_argument(
+        "--db-path",
+        default="bridge.db",
+        help="Path to SQLite database file (default: bridge.db)",
+    )
+    kanban_parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="Port for SSE transport (default: 8765)",
+    )
+    kanban_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run in dry-run mode (in-memory DB, no writes to disk)",
     )
 
     import_parser = subparsers.add_parser(
@@ -830,6 +1002,30 @@ def main() -> None:
         "--db-path",
         default="bridge.db",
         help="Path to SQLite database file (default: bridge.db)",
+    )
+
+    configure_parser = subparsers.add_parser(
+        "configure",
+        help="View or modify bridge.json configuration",
+    )
+    configure_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Show current configuration (default when no flags given)",
+    )
+    configure_parser.add_argument(
+        "--set",
+        nargs="+",
+        metavar="KEY=VALUE",
+        help=(
+            "Set configuration values. "
+            "Examples: --set agent=<id> role=<role>, --set <key>=<value>"
+        ),
+    )
+    configure_parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create default bridge.json at the first config path",
     )
 
     # ── Legacy top-level arguments (direct stdio/SSE mode) ────────
@@ -866,7 +1062,8 @@ def main() -> None:
         version="agent-bridge 0.1.0",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Enable verbose logging",
     )
@@ -888,6 +1085,14 @@ def main() -> None:
         _handle_start(args)
         return
 
+    if args.command == "kanban":
+        # Reuse start handler with kanban mode forced on
+        args.kanban = True
+        args.headless = False
+        args.ui_only = False
+        _handle_start(args)
+        return
+
     if args.command == "reset":
         _handle_reset(args)
         return
@@ -898,6 +1103,10 @@ def main() -> None:
 
     if args.command == "import":
         _handle_import(args)
+        return
+
+    if args.command == "configure":
+        _handle_configure(args)
         return
 
     # ── Legacy mode (direct stdio or SSE) ──────────────────────────
