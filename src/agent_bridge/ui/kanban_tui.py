@@ -25,9 +25,11 @@ from textual.binding import Binding
 from textual.widgets import Footer, Static
 
 from agent_bridge.state.database import Database
+from agent_bridge.ui.assign_task_modal import AssignTaskModal
 from agent_bridge.ui.chat_panel import ChatPanel
 from agent_bridge.ui.create_task_modal import CreateTaskModal
 from agent_bridge.ui.db_watcher import DBWatcher
+from agent_bridge.ui.edit_task_modal import EditTaskModal
 from agent_bridge.ui.kanban_board import KanbanBoard, TaskList
 from agent_bridge.ui.move_task_modal import MoveTaskModal
 from agent_bridge.ui.tui_bridge import TuiBridge
@@ -112,11 +114,14 @@ class KanbanTUI(App):
         Binding("up", "cursor_up", "Arriba", show=False),
         Binding("down", "cursor_down", "Abajo", show=False),
         Binding("n", "new_task", "Nueva"),
+        Binding("e", "edit_task", "Editar"),
         Binding("m", "move_task", "Mover"),
+        Binding("a", "assign_task", "Asignar"),
         Binding("d", "show_detail", "Detalle"),
         Binding("k", "focus_chat", "Chat"),
         Binding("q", "quit", "Salir"),
         Binding("r", "refresh", "Refrescar", show=False),
+        Binding("delete", "delete_task", "Eliminar", show=False),
     ]
 
     def __init__(self, db_path: str = "bridge.db", dry_run: bool = False) -> None:
@@ -124,6 +129,7 @@ class KanbanTUI(App):
         self._db = Database(db_path=db_path, dry_run=dry_run)
         self._bridge = TuiBridge(self._db)
         self._watcher = DBWatcher(self._db, interval=1.5, on_change=self._on_db_change)
+        self._pending_delete: str | None = None  # task_id pending delete confirmation
 
     def compose(self) -> ComposeResult:
         yield Static(id="header-bar")
@@ -263,9 +269,109 @@ class KanbanTUI(App):
         await self._update_summary_bar()
         self.notify("✅ Tarea movida", severity="information", timeout=3)
 
+    async def action_edit_task(self) -> None:
+        """Open the edit task modal for the selected task."""
+        board = self.query_one(KanbanBoard)
+        task = board.selected_task
+        if task is None:
+            self.notify("Seleccioná una tarea primero (↑↓)", severity="warning", timeout=2)
+            return
+
+        result = await self.push_screen(EditTaskModal(task, self._bridge))
+        if result:
+            await self._load_tasks()
+            await self._update_summary_bar()
+            self.notify("✅ Tarea actualizada", severity="information", timeout=3)
+
+    async def action_delete_task(self) -> None:
+        """Delete the selected task with two-step confirmation.
+
+        First press sets a pending-delete state and shows a warning.
+        Second press within 3 seconds executes the delete.
+        """
+        board = self.query_one(KanbanBoard)
+        task = board.selected_task
+        if task is None:
+            self.notify("Seleccioná una tarea primero (↑↓)", severity="warning", timeout=2)
+            return
+
+        task_id = task.get("id", "")
+        title = task.get("title", "?")
+
+        # Two-step confirmation
+        if self._pending_delete == task_id:
+            # Second press — execute
+            self._pending_delete = None
+            success = await self._bridge.delete_task(task_id)
+            if success:
+                await self._load_tasks()
+                await self._update_summary_bar()
+                self.notify(f"🗑 Tarea eliminada: {title}", severity="information", timeout=3)
+            else:
+                self.notify(
+                    "No se pudo eliminar — tarea no encontrada o ya no es editable",
+                    severity="error",
+                    timeout=3,
+                )
+        else:
+            # First press — arm the confirmation
+            self._pending_delete = task_id
+            self.notify(
+                f"⚠ Presioná Supr de nuevo para confirmar eliminación de: {title}",
+                severity="warning",
+                timeout=3,
+            )
+            # Auto-disarm after 3 seconds
+            self.set_timer(3, self._clear_pending_delete)
+
+    def _clear_pending_delete(self) -> None:
+        """Clear the pending delete state (called after timeout)."""
+        self._pending_delete = None
+
+    async def action_assign_task(self) -> None:
+        """Open the assign task modal for the selected task."""
+        board = self.query_one(KanbanBoard)
+        task = board.selected_task
+        if task is None:
+            self.notify("Seleccioná una tarea primero (↑↓)", severity="warning", timeout=2)
+            return
+
+        status = task.get("status", "")
+        if status != "pending":
+            self.notify("Solo se pueden asignar tareas pendientes", severity="warning", timeout=3)
+            return
+
+        agent_id = await self.push_screen(AssignTaskModal(task, self._bridge))
+        if agent_id:
+            success = await self._bridge.assign_task(
+                task_id=task.get("id", ""),
+                agent_id=agent_id,
+            )
+            if success:
+                await self._load_tasks()
+                await self._update_summary_bar()
+                # Find agent name for the notification
+                try:
+                    agents = await self._bridge.get_available_agents()
+                    agent_name = next(
+                        (a.get("name", a["agent_id"]) for a in agents if a["agent_id"] == agent_id),
+                        agent_id,
+                    )
+                except Exception:
+                    agent_name = agent_id
+                self.notify(f"✅ Tarea asignada a {agent_name}", severity="information", timeout=3)
+            else:
+                self.notify(
+                    "No se pudo asignar — tarea ya fue tomada o agente no disponible",
+                    severity="error",
+                    timeout=3,
+                )
+
     def action_show_detail(self) -> None:
-        """Placeholder: show full task detail."""
-        self.notify("📄 Detalle completo — próximo release", timeout=2)
+        """Show task detail — already visible in the right panel."""
+        # The detail is already rendered in TaskDetail when a task is selected.
+        # This binding exists for discoverability; it does nothing extra.
+        pass
 
     async def action_focus_chat(self) -> None:
         """Focus the chat input so the human can type immediately.

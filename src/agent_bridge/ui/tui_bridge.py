@@ -107,6 +107,78 @@ class TuiBridge:
         )
         return task_id
 
+    async def update_task(
+        self,
+        task_id: str,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> bool:
+        """Update a task's title and/or description.
+
+        Only tasks with status ``pending`` or ``in_progress`` can be
+        updated.  If neither *title* nor *description* is provided the
+        method returns ``False`` immediately.
+
+        Returns:
+            True if the task was updated, False if the task was not
+            found, is in a non-updatable status, or nothing to update.
+        """
+        if not title and not description:
+            return False
+
+        row = await self._db.execute_one(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        )
+        if row is None:
+            return False
+        if row["status"] not in ("pending", "in_progress"):
+            return False
+
+        updates: list[str] = []
+        params: list[str] = []
+        if title is not None:
+            updates.append("title = ?")
+            params.append(title)
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        updates.append("updated_at = datetime('now')")
+        params.append(task_id)
+
+        await self._db.execute_write(
+            f"UPDATE tasks SET {', '.join(updates)} WHERE id = ?",
+            tuple(params),
+        )
+        return True
+
+    async def delete_task(self, task_id: str) -> bool:
+        """Delete a task permanently.
+
+        Only tasks with status ``pending`` or ``in_progress`` can be
+        deleted.  Associated review rows are removed first.
+
+        Returns:
+            True if the task was deleted, False if the task was not
+            found or is in a non-deletable status.
+        """
+        row = await self._db.execute_one(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        )
+        if row is None:
+            return False
+        if row["status"] not in ("pending", "in_progress"):
+            return False
+
+        def _do_delete(conn):
+            conn.execute("DELETE FROM reviews WHERE task_id = ?", (task_id,))
+            conn.execute(
+                "DELETE FROM tasks WHERE id = ? AND status IN ('pending','in_progress')",
+                (task_id,),
+            )
+
+        await self._db.with_transaction(_do_delete)
+        return True
+
     # ── Plans ──────────────────────────────────────────────────────
 
     async def get_plans(self) -> list[dict[str, Any]]:
@@ -117,6 +189,45 @@ class TuiBridge:
         return [dict(r) for r in rows]
 
     # ── Agents ─────────────────────────────────────────────────────
+
+    async def get_available_agents(self) -> list[dict[str, Any]]:
+        """Return agents whose status is not 'offline'.
+
+        Used by the assign-task modal to show available assignees.
+        """
+        rows = await self._db.execute(
+            "SELECT * FROM agents WHERE status != 'offline'",
+        )
+        return [dict(r) for r in rows]
+
+    async def assign_task(self, task_id: str, agent_id: str) -> bool:
+        """Assign a pending task to an agent.
+
+        Checks the agent exists, then atomically sets the task's
+        ``assignee`` and transitions its status to ``in_progress``.
+        Only tasks in ``pending`` status can be assigned.
+
+        Returns:
+            True if the task was assigned, False if the agent does not
+            exist, the task was not found, or its status is not
+            ``pending``.
+        """
+        agent = await self._db.execute_one(
+            "SELECT agent_id FROM agents WHERE agent_id = ?",
+            (agent_id,),
+        )
+        if agent is None:
+            return False
+
+        def _do_assign(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET assignee = ?, status = 'in_progress', updated_at = datetime('now') "
+                "WHERE id = ? AND status = 'pending'",
+                (agent_id, task_id),
+            )
+            return cur.rowcount > 0
+
+        return await self._db.with_transaction(_do_assign)
 
     async def get_agents(self) -> list[dict[str, Any]]:
         """Return all registered agents."""
