@@ -258,26 +258,33 @@ def create_server(
             if name == "hello":
                 return [types.TextContent(type="text", text="¡Agent Bridge alive! 👋")]
 
-            # Domain handlers (plan, task, review, chat)
-            for handler in [
-                handle_plan_tool,
-                handle_task_tool,
-                handle_review_tool,
-                handle_chat_tool,
-            ]:
+            # Prefix-based dispatch (CODE-04/ARCH-03: dict routing + isolation)
+            tool_prefix = name.split(".", 1)[0]
+
+            DOMAIN_DISPATCH: dict[str, Callable] = {
+                "plan": handle_plan_tool,
+                "task": handle_task_tool,
+                "review": handle_review_tool,
+                "chat": handle_chat_tool,
+            }
+
+            handler = DOMAIN_DISPATCH.get(tool_prefix)
+            if handler is not None:
                 result = await handler(db, name, args)
                 if result is not None:
                     return result
 
             # Agent presence tools
-            result = await handle_agent_tool(db, config, name, args)
-            if result is not None:
-                return result
+            if tool_prefix == "agent":
+                result = await handle_agent_tool(db, config, name, args)
+                if result is not None:
+                    return result
 
             # Skill discovery tools
-            result = await handle_skill_tool(config, name, args)
-            if result is not None:
-                return result
+            if tool_prefix == "skill":
+                result = await handle_skill_tool(config, name, args)
+                if result is not None:
+                    return result
 
             raise ValueError(f"Unknown tool: {name}")
 

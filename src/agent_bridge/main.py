@@ -42,6 +42,11 @@ def _handle_start(args: argparse.Namespace) -> None:
         return
 
     # ── Default: SSE server in subprocess + TUI in this process ───
+    # PROD-06: No mutual health check between TUI and SSE server.
+    # If the SSE subprocess dies silently, the TUI retries SSE connections
+    # with exponential backoff but never gets re-spawned. A future fix
+    # could add a /health endpoint to the SSE server and periodic health
+    # pings from the TUI with auto-respawn logic.
     logger.info("Starting Agent Bridge (SSE on port %d + TUI)", port)
     cmd = [
         sys.executable,

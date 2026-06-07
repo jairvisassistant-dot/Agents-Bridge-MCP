@@ -50,7 +50,7 @@ PLAN_TOOLS = [
                 "plan_id": {"type": "string", "description": "Plan ID"},
                 "status": {
                     "type": "string",
-                    "description": "New status (idle, planning, tasks_ready, in_progress, completed)",
+                    "description": "New status (idle, planning, tasks_ready, in_progress, completed, archived)",
                 },
             },
             "required": ["plan_id", "status"],

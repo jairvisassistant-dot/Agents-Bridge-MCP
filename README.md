@@ -505,6 +505,7 @@ La TUI reconecta automáticamente si el proceso se cae:
 
 ```
 Plan:     idle → planning → tasks_ready → in_progress → completed
+          └─→ archived (terminal, soft-delete)
 Task:     pending → in_progress → review → approved
                                     ↓
                               changes_requested → review
@@ -519,6 +520,47 @@ Todas las tools están envueltas en try/except. Si algo falla:
 ```json
 {"error": "internal_error", "detail": "...", "request_id": "..."}
 ```
+
+---
+
+## Troubleshooting (PROD-08)
+
+### `agent-bridge start` falla con "address already in use"
+
+Otro proceso ya está usando el puerto 8765. Comprobá con:
+
+```bash
+lsof -ti:8765 | xargs kill
+```
+
+O usá un puerto distinto:
+
+```bash
+agent-bridge start --port 9876
+```
+
+### La TUI se ve cortada o no responde
+
+Asegurate de que la terminal tenga al menos 80×24 caracteres.
+En tmux o pantalla dividida muy chica, la TUI puede no renderizar correctamente.
+
+### Los agentes no aparecen en la TUI
+
+- Verificá que el servidor SSE esté corriendo (`agent-bridge start --headless`)
+- Los agentes se conectan vía MCP y reportan heartbeat cada 30s.
+- Si un agente no hace heartbeat por más de 5 minutos, se marca `offline`
+  y sus tareas se reasignan automáticamente.
+
+### Error "permission_denied" al llamar una tool
+
+Cada rol tiene tools permitidas (ver [Permisos por rol](#permisos-por-rol)).
+El rol se asigna en el primer heartbeat y se congela. Si necesitás cambiarlo,
+editá `AGENT_BRIDGE_ID` en la configuración del agente.
+
+### El comando `agent-bridge` no se encuentra
+
+Si instalaste globalmente con `uv tool install`, verificá que `~/.local/bin`
+esté en tu PATH. Si instalaste como dev dependency, usá `uv run agent-bridge`.
 
 ---
 
