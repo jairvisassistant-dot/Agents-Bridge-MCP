@@ -2,15 +2,15 @@
 
 import json
 import logging
+import sqlite3
 import uuid
 
 import mcp.types as types
 
 from agent_bridge.state.database import Database
 from agent_bridge.state.state_machine import (
-    validate_task_transition,
-    validate_review_transition,
     TransitionError,
+    validate_task_transition,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,9 +68,7 @@ REVIEW_TOOLS = [
 ]
 
 
-async def handle_review_tool(
-    db: Database, name: str, args: dict
-) -> list[types.TextContent] | None:
+async def handle_review_tool(db: Database, name: str, args: dict) -> list[types.TextContent] | None:
     if name == "review.start":
         return await _start_review(db, args)
     elif name == "review.approve":
@@ -82,26 +80,58 @@ async def handle_review_tool(
     return None
 
 
-async def _start_review(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+MAX_REVIEW_CYCLES = 3
+
+
+async def _check_review_cycles(db: Database, task_id: str) -> str | None:
+    """Return an error message if the task has exceeded max review cycles, else None."""
+    row = await db.execute_one(
+        "SELECT COUNT(*) as cnt FROM reviews WHERE task_id = ? AND status = 'changes_requested'",
+        (task_id,),
+    )
+    if row and row["cnt"] >= MAX_REVIEW_CYCLES:
+        return json.dumps({
+            "error": "max_review_cycles_reached",
+            "detail": (
+                f"This task has reached the maximum of {MAX_REVIEW_CYCLES} review cycles. "
+                "Escalate to human for resolution."
+            ),
+        })
+    return None
+
+
+async def _start_review(db: Database, args: dict) -> list[types.TextContent]:
     task_id = args.get("task_id")
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]
 
     # Task must be in 'review' state to start a review
-    task = await db.execute_one(
-        "SELECT status FROM tasks WHERE id = ?", (task_id,)
-    )
+    task = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
     if task is None:
         return [types.TextContent(type="text", text='{"error": "task not found"}')]
     if task["status"] != "review":
         return [
             types.TextContent(
                 type="text",
-                text=f'{{"error": "task is {task["status"]}, must be review"}}',
+                text=json.dumps({"error": f"task is {task['status']}, must be review"}),
             )
         ]
+
+    # Max 3 review cycles check
+    cycle_error = await _check_review_cycles(db, task_id)
+    if cycle_error:
+        return [types.TextContent(type="text", text=cycle_error)]
+
+    # Check for existing active review
+    existing = await db.execute_one(
+        "SELECT id FROM reviews WHERE task_id = ? AND status = 'in_review'",
+        (task_id,),
+    )
+    if existing is not None:
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"error": "review already active", "review_id": existing["id"]})
+        )]
 
     review_id = str(uuid.uuid4())
     await db.execute(
@@ -113,114 +143,155 @@ async def _start_review(
     return [
         types.TextContent(
             type="text",
-            text=f'{{"review_id": "{review_id}", "status": "in_review"}}',
+            text=json.dumps({"review_id": review_id, "status": "in_review"}),
         )
     ]
 
 
-async def _approve_review(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _approve_review(db: Database, args: dict) -> list[types.TextContent]:
     task_id = args.get("task_id")
     comment = args.get("comment", "")
 
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]
 
-    # Validate task is in review state (atomic check)
-    affected = await db.execute_write(
-        "UPDATE tasks SET status = 'approved', updated_at = datetime('now') "
-        "WHERE id = ? AND status = 'review'",
-        (task_id,),
-    )
+    # ── cannot_approve_own_work check ──────────────────────────
+    restrictions = args.get("_restrictions", {})
+    if restrictions.get("cannot_approve_own_work", False):
+        task_row = await db.execute_one(
+            "SELECT assignee FROM tasks WHERE id = ?", (task_id,)
+        )
+        if task_row and task_row["assignee"]:
+            agent_role = args.get("_agent_role")
+            if agent_role and task_row["assignee"] == agent_role:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": "cannot_approve_own_work",
+                        "detail": f"Agents with role '{agent_role}' cannot approve their own work.",
+                    })
+                )]
+
+    # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
+    def _do_approve(conn: sqlite3.Connection) -> int:
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND status = 'review'",
+            (task_id,),
+        )
+        if cur.rowcount == 0:
+            return 0
+        conn.execute(
+            """UPDATE reviews SET status = 'approved', comment = ?
+               WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
+            (comment, task_id),
+        )
+        return cur.rowcount
+
+    affected = await db.with_transaction(_do_approve)
 
     if affected == 0:
-        row = await db.execute_one(
-            "SELECT status FROM tasks WHERE id = ?", (task_id,)
-        )
+        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
         if row is None:
             return [types.TextContent(type="text", text='{"error": "task not found"}')]
-        try:
-            validate_task_transition(row["status"], "approved")
-        except TransitionError as e:
-            return [types.TextContent(type="text", text=f'{{"error": "{e}"}}')]
         return [types.TextContent(
             type="text",
-            text=f'{{"error": "task is {row["status"]}, could not approve"}}',
+            text=json.dumps({
+                "error": f"task is in '{row['status']}' state, expected 'review'"
+            })
         )]
 
-    # Update the latest review record
-    await db.execute(
-        """UPDATE reviews SET status = 'approved', comment = ?
-           WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
-        (comment, task_id),
-    )
-
     logger.info("Task %s approved", task_id)
+    # Notify chat
+    title = await db.get_task_title(task_id)
+    sender_name = args.get("_sender_name", "arquitecto")
+    await db.notify_chat(f"✅ {sender_name} aprobó: {title}", sender=sender_name)
+    # System notification to assignee
+    task_row = await db.execute_one("SELECT assignee FROM tasks WHERE id = ?", (task_id,))
+    if task_row and task_row["assignee"]:
+        target_map = {"developer": "desarrollador", "architect": "arquitecto"}
+        notify_target = target_map.get(task_row["assignee"], task_row["assignee"])
+        await db.send_system_notification(
+            target=notify_target,
+            text=f"Tu tarea '{title}' fue aprobada.",
+            msg_type="status_update",
+            priority="high",
+        )
     return [
         types.TextContent(
             type="text",
-            text=f'{{"task_id": "{task_id}", "status": "approved", "comment": "{comment}"}}',
+            text=json.dumps({"task_id": task_id, "status": "approved", "comment": comment}),
         )
     ]
 
 
-async def _request_changes(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _request_changes(db: Database, args: dict) -> list[types.TextContent]:
     task_id = args.get("task_id")
     changes = args.get("changes", "")
 
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]
     if not changes:
-        return [
-            types.TextContent(
-                type="text", text='{"error": "changes description required"}'
-            )
-        ]
+        return [types.TextContent(type="text", text='{"error": "changes description required"}')]
 
-    # Atomic: UPDATE only if task is in 'review' state
-    affected = await db.execute_write(
-        "UPDATE tasks SET status = 'changes_requested', updated_at = datetime('now') "
-        "WHERE id = ? AND status = 'review'",
-        (task_id,),
-    )
+    # Max 3 review cycles check before requesting more changes
+    cycle_error = await _check_review_cycles(db, task_id)
+    if cycle_error:
+        return [types.TextContent(type="text", text=cycle_error)]
+
+    # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
+    def _do_request_changes(conn: sqlite3.Connection) -> int:
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'changes_requested', updated_at = datetime('now') "
+            "WHERE id = ? AND status = 'review'",
+            (task_id,),
+        )
+        if cur.rowcount == 0:
+            return 0
+        conn.execute(
+            """UPDATE reviews SET status = 'changes_requested', comment = ?
+               WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
+            (changes, task_id),
+        )
+        return cur.rowcount
+
+    affected = await db.with_transaction(_do_request_changes)
 
     if affected == 0:
-        row = await db.execute_one(
-            "SELECT status FROM tasks WHERE id = ?", (task_id,)
-        )
+        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
         if row is None:
             return [types.TextContent(type="text", text='{"error": "task not found"}')]
-        try:
-            validate_task_transition(row["status"], "changes_requested")
-        except TransitionError as e:
-            return [types.TextContent(type="text", text=f'{{"error": "{e}"}}')]
         return [types.TextContent(
             type="text",
-            text=f'{{"error": "task is {row["status"]}, could not request changes"}}',
+            text=json.dumps({
+                "error": f"task is in '{row['status']}' state, expected 'review'"
+            })
         )]
 
-    # Update the latest review record
-    await db.execute(
-        """UPDATE reviews SET status = 'changes_requested', comment = ?
-           WHERE id = (SELECT id FROM reviews WHERE task_id = ? ORDER BY created_at DESC LIMIT 1)""",
-        (changes, task_id),
-    )
-
     logger.info("Changes requested for task %s: %s", task_id, changes)
+    # Notify chat
+    title = await db.get_task_title(task_id)
+    sender_name = args.get("_sender_name", "arquitecto")
+    await db.notify_chat(f"🔄 {sender_name} pidió cambios en: {title}", sender=sender_name)
+    # System notification to assignee
+    task_row = await db.execute_one("SELECT assignee FROM tasks WHERE id = ?", (task_id,))
+    if task_row and task_row["assignee"]:
+        target_map = {"developer": "desarrollador", "architect": "arquitecto"}
+        notify_target = target_map.get(task_row["assignee"], task_row["assignee"])
+        await db.send_system_notification(
+            target=notify_target,
+            text=f"Tu tarea '{title}' requiere cambios: {changes[:200]}",
+            msg_type="status_update",
+            priority="high",
+        )
     return [
         types.TextContent(
             type="text",
-            text=f'{{"task_id": "{task_id}", "status": "changes_requested"}}',
+            text=json.dumps({"task_id": task_id, "status": "changes_requested"}),
         )
     ]
 
 
-async def _get_review_history(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _get_review_history(db: Database, args: dict) -> list[types.TextContent]:
     task_id = args.get("task_id")
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]

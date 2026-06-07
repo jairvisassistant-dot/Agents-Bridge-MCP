@@ -4,8 +4,6 @@ Every state change in the system goes through this module. If a transition
 isn't defined here, it's rejected with a clear error message.
 """
 
-from typing import TypeVar
-
 from agent_bridge.state.models import (
     PlanStatus,
     ReviewStatus,
@@ -14,8 +12,6 @@ from agent_bridge.state.models import (
 )
 
 # ── Generic transition helpers ───────────────────────────────────
-
-T = TypeVar("T")
 
 
 class TransitionError(ValueError):
@@ -28,7 +24,7 @@ class TransitionError(ValueError):
         super().__init__(f"Invalid transition: {entity} cannot go from '{current}' to '{target}'")
 
 
-def validate_transition(
+def validate_transition[T](
     entity_name: str,
     current: T,
     target: T,
@@ -98,6 +94,7 @@ def validate_thread_transition(current: ThreadStatus, target: ThreadStatus) -> N
 
 
 # ── Quick lookup helpers (for tool handlers) ──────────────────────
+
 
 def can_transition(entity_type: str, current: str, target: str) -> bool:
     """Return True if the transition is valid, without raising."""

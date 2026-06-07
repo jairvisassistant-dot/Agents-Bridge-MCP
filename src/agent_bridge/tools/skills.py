@@ -32,9 +32,7 @@ SKILL_TOOLS = [
 ]
 
 
-async def handle_skill_tool(
-    config: BridgeConfig, name: str, args: dict
-) -> list[types.TextContent] | None:
+async def handle_skill_tool(config: BridgeConfig, name: str, args: dict) -> list[types.TextContent] | None:
     if name == "skill.list":
         return _list_skills(config)
     elif name == "skill.get":
@@ -47,9 +45,7 @@ def _list_skills(config: BridgeConfig) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps(skills, indent=2))]
 
 
-def _get_skill(
-    config: BridgeConfig, args: dict
-) -> list[types.TextContent]:
+def _get_skill(config: BridgeConfig, args: dict) -> list[types.TextContent]:
     skill_name = args.get("skill_name")
     if not skill_name:
         return [types.TextContent(type="text", text='{"error": "skill_name required"}')]

@@ -3,26 +3,25 @@
 Uses sync sqlite3 wrapped in anyio.to_thread.run_sync to avoid
 blocking the event loop.
 
-Concurrency: SQLite WAL mode handles concurrent reads naturally.
-Writes are serialized by SQLite internally (no FileLock needed).
-Key operations like task.claim use a lightweight flag-based lock
-stored in SQLite itself (atomic UPDATE ... WHERE status='pending').
+Concurrency: A single persistent connection is used for normal mode,
+serialized via threading.RLock. WAL mode + BEGIN IMMEDIATE on writes
+ensures write-ahead locking without deadlocks.
 
-Dry-run mode: when _dry_run=True, write operations (INSERT/UPDATE/DELETE/
-ALTER/CREATE/DROP) are logged and skipped. The connection uses :memory:
-so no persistent state is modified. Reads are allowed against the
-in-memory schema.
+Dry-run mode: when _dry_run=True, write operations are logged and
+skipped. Each operation gets a fresh :memory: connection so no
+persistent state is modified.
 """
 
 import logging
 import sqlite3
+import threading
 import uuid
 
 import anyio
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 4  # bump this when adding migrations below
+SCHEMA_VERSION = 7  # bump this when adding migrations below
 
 _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP")
 
@@ -30,10 +29,8 @@ _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP")
 def _is_write(sql: str) -> bool:
     """Return True if the SQL statement is a write operation."""
     stripped = sql.strip().upper()
-    for prefix in _WRITE_PREFIXES:
-        if stripped.startswith(prefix):
-            return True
-    return False
+    return any(stripped.startswith(prefix) for prefix in _WRITE_PREFIXES)
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS _meta (
@@ -86,6 +83,9 @@ CREATE TABLE IF NOT EXISTS messages (
     sender TEXT NOT NULL,
     target TEXT,
     text TEXT NOT NULL,
+    msg_type TEXT NOT NULL DEFAULT 'chat',
+    priority TEXT NOT NULL DEFAULT 'normal',
+    read INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS threads (
     title TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS ping_requests (
+    id TEXT PRIMARY KEY,
+    sender_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+    pong_at TEXT,
+    latency_ms INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending'
 );
 """
 
@@ -124,55 +134,131 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
         conn.execute("ALTER TABLE threads ADD COLUMN last_activity_at TEXT")
         logger.info("Migration v3→v4: added discussion fields to threads and messages")
 
+    if from_version < 5:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ping_requests (
+                id TEXT PRIMARY KEY,
+                sender_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')),
+                pong_at TEXT,
+                latency_ms INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+        """)
+        logger.info("Migration v4→v5: added ping_requests table")
+
+    if from_version < 6:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        if "msg_type" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN msg_type TEXT NOT NULL DEFAULT 'chat'")
+        if "priority" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'")
+        if "read" not in existing:
+            conn.execute("ALTER TABLE messages ADD COLUMN read INTEGER NOT NULL DEFAULT 0")
+        logger.info("Migration v5→v6: added msg_type, priority, read to messages")
+
+    if from_version < 7:
+        conn.execute("ALTER TABLE tasks ADD COLUMN depends_on TEXT DEFAULT NULL")
+        logger.info("Migration v6→v7: added depends_on to tasks (nullable FK to tasks.id)")
+
+
+def _run_reverse_migrations(conn: sqlite3.Connection, from_version: int) -> None:
+    """Run reverse migrations to downgrade schema version."""
+    if from_version >= 7:
+        conn.execute("ALTER TABLE tasks DROP COLUMN depends_on")
+        logger.info("Reverse migration v7→v6: dropped depends_on from tasks")
+
+    if from_version >= 6:
+        conn.executescript("""
+            CREATE TABLE messages_v5 AS SELECT id, thread_id, sender, target, text, created_at FROM messages;
+            DROP TABLE messages;
+            ALTER TABLE messages_v5 RENAME TO messages;
+        """)
+        logger.info("Reverse migration v6→v5: reverted msg_type, priority, read")
+
+    if from_version >= 5:
+        conn.execute("DROP TABLE IF EXISTS ping_requests")
+        logger.info("Reverse migration v5→v4: dropped ping_requests")
+
+    if from_version >= 4:
+        conn.executescript("""
+            CREATE TABLE messages_v3 AS SELECT id, thread_id, sender, target, text, created_at FROM messages;
+            DROP TABLE messages;
+            ALTER TABLE messages_v3 RENAME TO messages;
+            CREATE TABLE threads_v3 AS SELECT id, title, status, created_at FROM threads;
+            DROP TABLE threads;
+            ALTER TABLE threads_v3 RENAME TO threads;
+        """)
+        logger.info("Reverse migration v4→v3: reverted discussion fields")
+
+    if from_version >= 3:
+        conn.execute("ALTER TABLE tasks DROP COLUMN diff_text")
+        logger.info("Reverse migration v3→v2: dropped diff_text")
+
 
 class Database:
-    """Manages shared SQLite state with WAL mode.
+    """Manages shared SQLite state with WAL mode and singleton connection.
 
-    All DB operations run via anyio.to_thread.run_sync to keep the
-    event loop responsive.
+    A single persistent connection (self._conn) is created on first use and
+    reused for the lifecycle. All access is serialized via threading.RLock
+    to ensure thread safety when used with anyio.to_thread.run_sync.
 
-    Concurrency is handled by SQLite's WAL mode + atomic UPDATE with
-    WHERE conditions. No external file locks needed.
+    Writes use BEGIN IMMEDIATE to acquire a write lock upfront, preventing
+    deadlocks under concurrent access.
 
     Dry-run mode: when dry_run=True, write operations are logged and
-    skipped. The connection uses an in-memory SQLite DB so no
-    persistent state is modified. Reads are allowed against the
-    in-memory schema (initialised on first connect).
+    skipped. Each operation gets a fresh :memory: connection, so no
+    persistent state is modified.
     """
 
     def __init__(self, db_path: str = "bridge.db", dry_run: bool = False):
         self.db_path = db_path
         self._dry_run = dry_run
-        self._memory_conn: sqlite3.Connection | None = None
+        self._conn: sqlite3.Connection | None = None
+        self._dry_run_conn: sqlite3.Connection | None = None
+        self._lock = threading.RLock()
 
     # ── Sync helpers (run in thread via anyio) ─────────────────
 
     def _connect(self) -> sqlite3.Connection:
-        if self._dry_run:
-            if self._memory_conn is None:
-                self._memory_conn = sqlite3.connect(":memory:")
-                self._memory_conn.row_factory = sqlite3.Row
-                self._memory_conn.execute("PRAGMA journal_mode=WAL;")
-                self._memory_conn.execute("PRAGMA foreign_keys=ON;")
-                self._memory_conn.execute("PRAGMA busy_timeout=5000;")
-            return self._memory_conn
+        """Return a SQLite connection.
 
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA busy_timeout=5000;")  # 5s wait on lock
-        return conn
+        Normal mode: returns the singleton ``self._conn``, creating it
+        on the first call and applying PRAGMAs once.
+
+        Dry-run mode: returns a fresh ``:memory:`` connection each time
+        (never cached) so the object is not shared across threads.
+        """
+        if self._dry_run:
+            if self._dry_run_conn is None:
+                self._dry_run_conn = sqlite3.connect(":memory:")
+                self._dry_run_conn.row_factory = sqlite3.Row
+                self._dry_run_conn.execute("PRAGMA journal_mode=WAL;")
+                self._dry_run_conn.execute("PRAGMA foreign_keys=ON;")
+                self._dry_run_conn.execute("PRAGMA busy_timeout=5000;")
+            return self._dry_run_conn
+
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA foreign_keys=ON;")
+            self._conn.execute("PRAGMA busy_timeout=5000;")
+        return self._conn
 
     def _initialize(self) -> None:
-        conn = self._connect()
-        try:
-            conn.executescript(SCHEMA_SQL)
-            conn.commit()
+        """Create schema tables and run pending migrations.
 
-            cursor = conn.execute(
-                "SELECT value FROM _meta WHERE key = 'schema_version'"
-            )
+        Wrapped in BEGIN IMMEDIATE + lock so only one caller runs
+        migrations, preventing race conditions on concurrent startup.
+        """
+        with self._lock:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executescript(SCHEMA_SQL)
+
+            cursor = conn.execute("SELECT value FROM _meta WHERE key = 'schema_version'")
             row = cursor.fetchone()
             current_version = int(row[0]) if row else 0
 
@@ -187,51 +273,47 @@ class Database:
                     "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
-                conn.commit()
-        finally:
-            if not self._dry_run:
-                conn.close()
+            elif current_version > SCHEMA_VERSION:
+                logger.info(
+                    "Reverse-migrating schema from v%d to v%d",
+                    current_version,
+                    SCHEMA_VERSION,
+                )
+                _run_reverse_migrations(conn, current_version)
+                conn.execute(
+                    "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
+            conn.commit()
 
-    def _execute(
-        self, sql: str, params: tuple = ()
-    ) -> list[sqlite3.Row]:
+    def _execute(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         if self._dry_run and _is_write(sql):
             logger.info("[DRY-RUN] SQL: %s | params=%s", sql, params)
             return []
-        conn = self._connect()
-        try:
+        with self._lock:
+            conn = self._connect()
             cursor = conn.execute(sql, params)
             if not self._dry_run:
                 conn.commit()
             return cursor.fetchall()
-        finally:
-            if not self._dry_run:
-                conn.close()
 
-    def _execute_one(
-        self, sql: str, params: tuple = ()
-    ) -> sqlite3.Row | None:
+    def _execute_one(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         if self._dry_run and _is_write(sql):
             logger.info("[DRY-RUN] SQL: %s | params=%s", sql, params)
             return None
         rows = self._execute(sql, params)
         return rows[0] if rows else None
 
-    def _execute_write(
-        self, sql: str, params: tuple = ()
-    ) -> int:
+    def _execute_write(self, sql: str, params: tuple = ()) -> int:
         if self._dry_run and _is_write(sql):
             logger.info("[DRY-RUN] SQL: %s | params=%s", sql, params)
             return 0
-        conn = self._connect()
-        try:
+        with self._lock:
+            conn = self._connect()
+            conn.execute("BEGIN IMMEDIATE")
             cursor = conn.execute(sql, params)
-            if not self._dry_run:
-                conn.commit()
+            conn.commit()
             return cursor.rowcount
-        finally:
-            if not self._dry_run:
-                conn.close()
 
     # ── Async public API ───────────────────────────────────────
 
@@ -241,26 +323,20 @@ class Database:
         mode = "dry-run (:memory:)" if self._dry_run else self.db_path
         logger.info("Database initialized at %s", mode)
 
-    async def execute(
-        self, sql: str, params: tuple = ()
-    ) -> list[sqlite3.Row]:
+    async def execute(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         """Execute SQL and return all rows (for SELECT)."""
         return await anyio.to_thread.run_sync(self._execute, sql, params)
 
-    async def execute_one(
-        self, sql: str, params: tuple = ()
-    ) -> sqlite3.Row | None:
+    async def execute_one(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         """Execute SQL and return first row or None."""
         return await anyio.to_thread.run_sync(self._execute_one, sql, params)
 
-    async def execute_write(
-        self, sql: str, params: tuple = ()
-    ) -> int:
+    async def execute_write(self, sql: str, params: tuple = ()) -> int:
         """Execute an UPDATE/INSERT and return the number of affected rows.
 
         Use this for atomic conditional updates:
           await db.execute_write(
-              \"UPDATE tasks SET status='x' WHERE id=? AND status='pending'\",
+              "UPDATE tasks SET status='x' WHERE id=? AND status='pending'",
               (task_id,)
           )
         Returns rowcount (1 if update succeeded, 0 if condition failed).
@@ -282,20 +358,34 @@ class Database:
         as a single atomic unit — both UPDATE (turn claim) and INSERT
         (message) happen before any other writer can observe the change.
         """
+
         def _run():
-            conn = self._connect()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                result = func(conn)
-                conn.commit()
-                return result
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+            if self._dry_run:
+                logger.info("[DRY-RUN] with_transaction skipped")
+                return None
+            with self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                    result = func(conn)
+                    conn.commit()
+                    return result
+                except Exception:
+                    conn.rollback()
+                    raise
 
         return await anyio.to_thread.run_sync(_run)
+
+    async def close(self) -> None:
+        """Close the persistent connection and release resources."""
+
+        def _close():
+            with self._lock:
+                if self._conn is not None:
+                    self._conn.close()
+                    self._conn = None
+
+        await anyio.to_thread.run_sync(_close)
 
     async def resolve_thread_atomic(self, thread_id: str, system_text: str) -> bool:
         """Atomically resolve a thread and insert a system message.
@@ -306,6 +396,7 @@ class Database:
         was already resolved (by a concurrent caller or a background
         timeout).
         """
+
         def _resolve(conn):
             cur = conn.execute(
                 "UPDATE threads SET status = 'resolved' WHERE id = ? AND status = 'open'",
@@ -325,9 +416,11 @@ class Database:
 
     async def reset(self) -> None:
         """Drop all tables and recreate the schema from scratch."""
+
         def _reset():
-            conn = self._connect()
-            try:
+            with self._lock:
+                conn = self._connect()
+                conn.execute("BEGIN IMMEDIATE")
                 conn.executescript("""
                     DROP TABLE IF EXISTS reviews;
                     DROP TABLE IF EXISTS tasks;
@@ -337,7 +430,6 @@ class Database:
                     DROP TABLE IF EXISTS agents;
                     DROP TABLE IF EXISTS _meta;
                 """)
-                conn.commit()
                 conn.executescript(SCHEMA_SQL)
                 conn.execute(
                     "INSERT OR REPLACE INTO _meta (key, value) VALUES ('schema_version', ?)",
@@ -345,21 +437,18 @@ class Database:
                 )
                 conn.commit()
                 logger.info("Database reset complete — all data cleared")
-            finally:
-                if not self._dry_run:
-                    conn.close()
+
         await anyio.to_thread.run_sync(_reset)
 
     # ── Export / Import ─────────────────────────────────────────
 
     async def get_plan_export(self, plan_id: str) -> dict | None:
         """Export a plan with all its tasks and reviews as a single dict."""
+
         def _export():
-            conn = self._connect()
-            try:
-                plan = conn.execute(
-                    "SELECT * FROM plans WHERE id = ?", (plan_id,)
-                ).fetchone()
+            with self._lock:
+                conn = self._connect()
+                plan = conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
                 if plan is None:
                     return None
 
@@ -382,16 +471,16 @@ class Database:
                     "tasks": [dict(t) for t in tasks],
                     "reviews": [dict(r) for r in reviews],
                 }
-            finally:
-                if not self._dry_run:
-                    conn.close()
+
         return await anyio.to_thread.run_sync(_export)
 
     async def import_plan(self, plan_data: dict) -> dict:
         """Import a plan with its tasks and reviews (INSERT OR IGNORE)."""
+
         def _import():
-            conn = self._connect()
-            try:
+            with self._lock:
+                conn = self._connect()
+                conn.execute("BEGIN IMMEDIATE")
                 plan = plan_data["plan"]
                 conn.execute(
                     """INSERT OR IGNORE INTO plans
@@ -446,36 +535,36 @@ class Database:
 
                 conn.commit()
                 return {"plan_id": plan["id"], "tasks_count": tasks_count}
-            finally:
-                if not self._dry_run:
-                    conn.close()
+
         return await anyio.to_thread.run_sync(_import)
 
     # ── Stale agent detection and task reassignment ──────────────
 
     async def get_stale_agents(self, threshold_minutes: int = 5) -> list[sqlite3.Row]:
         """Return agents whose last_seen is older than threshold and not yet offline."""
+
         def _query():
-            conn = self._connect()
-            try:
+            with self._lock:
+                conn = self._connect()
                 return conn.execute(
                     """SELECT agent_id, status, last_seen FROM agents
                        WHERE status != 'offline'
                        AND last_seen < datetime('now', ?)""",
-                    (f'-{threshold_minutes} minutes',),
+                    (f"-{threshold_minutes} minutes",),
                 ).fetchall()
-            finally:
-                conn.close()
+
         return await anyio.to_thread.run_sync(_query)
 
     async def reassign_tasks_from_agent(self, agent_id: str) -> int:
         """Reassign in_progress tasks from a stale agent back to pending.
-        
+
         Returns the number of tasks reassigned.
         """
+
         def _reassign():
-            conn = self._connect()
-            try:
+            with self._lock:
+                conn = self._connect()
+                conn.execute("BEGIN IMMEDIATE")
                 cursor = conn.execute(
                     """UPDATE tasks SET status = 'pending', assignee = NULL,
                        updated_at = datetime('now')
@@ -484,20 +573,106 @@ class Database:
                 )
                 conn.commit()
                 return cursor.rowcount
-            finally:
-                conn.close()
+
         return await anyio.to_thread.run_sync(_reassign)
 
     async def mark_agent_offline(self, agent_id: str) -> None:
         """Mark an agent as offline."""
+
         def _mark():
-            conn = self._connect()
-            try:
+            with self._lock:
+                conn = self._connect()
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "UPDATE agents SET status = 'offline' WHERE agent_id = ?",
                     (agent_id,),
                 )
                 conn.commit()
-            finally:
-                conn.close()
+
         await anyio.to_thread.run_sync(_mark)
+
+    async def notify_chat(self, text: str, sender: str = "system") -> None:
+        """Post a system notification message to the general chat."""
+        msg_id = str(uuid.uuid4())
+        await self.execute_write(
+            "INSERT INTO messages (id, sender, text) VALUES (?, ?, ?)",
+            (msg_id, sender, text),
+        )
+
+    async def get_task_title(self, task_id: str) -> str | None:
+        """Fetch the title of a task by ID."""
+        row = await self.execute_one("SELECT title FROM tasks WHERE id = ?", (task_id,))
+        return row["title"] if row else None
+
+    # ── Ping / Pong ─────────────────────────────────────────────
+
+    async def create_ping_request(self, sender_id: str, target_id: str) -> str:
+        """Create a new ping request and return its ID."""
+        ping_id = str(uuid.uuid4())
+        await self.execute_write(
+            "INSERT INTO ping_requests (id, sender_id, target_id) VALUES (?, ?, ?)",
+            (ping_id, sender_id, target_id),
+        )
+        return ping_id
+
+    async def record_pong(self, ping_id: str) -> int:
+        """Record a pong response and return latency in milliseconds.
+
+        Uses with_transaction so the UPDATE and SELECT happen atomically.
+        Returns 0 if the ping_id is unknown or already resolved.
+        """
+
+        def _record(conn: sqlite3.Connection) -> int:
+            conn.execute(
+                """UPDATE ping_requests
+                   SET pong_at = datetime('now'),
+                       status = 'pong',
+                       latency_ms = CAST(
+                           (julianday('now') - julianday(sent_at)) * 86400000 AS INTEGER
+                       )
+                   WHERE id = ? AND status = 'pending'""",
+                (ping_id,),
+            )
+            row = conn.execute(
+                "SELECT latency_ms FROM ping_requests WHERE id = ?",
+                (ping_id,),
+            ).fetchone()
+            return int(row["latency_ms"]) if row and row["latency_ms"] is not None else 0
+
+        return await self.with_transaction(_record)
+
+    async def get_ping_request(self, ping_id: str) -> dict | None:
+        """Get a ping request by ID, or None if not found."""
+        row = await self.execute_one("SELECT * FROM ping_requests WHERE id = ?", (ping_id,))
+        return dict(row) if row else None
+
+    # ── Enhanced messaging ───────────────────────────────────────
+
+    async def mark_message_read(self, message_id: str) -> None:
+        """Mark a specific message as read."""
+        await self.execute_write(
+            "UPDATE messages SET read = 1 WHERE id = ?",
+            (message_id,),
+        )
+
+    async def send_system_notification(
+        self,
+        target: str,
+        text: str,
+        msg_type: str = "status_update",
+        priority: str = "normal",
+    ) -> None:
+        """Send a system-generated typed notification to a specific agent."""
+        msg_id = str(uuid.uuid4())
+        await self.execute_write(
+            "INSERT INTO messages (id, sender, target, text, msg_type, priority) VALUES (?, ?, ?, ?, ?, ?)",
+            (msg_id, "system", target, text, msg_type, priority),
+        )
+
+    async def get_unread_count(self, target: str) -> int:
+        """Get count of unread messages for a target agent."""
+        row = await self.execute_one(
+            "SELECT COUNT(*) AS cnt FROM messages WHERE target = ? AND read = 0",
+            (target,),
+        )
+        return row["cnt"] if row else 0

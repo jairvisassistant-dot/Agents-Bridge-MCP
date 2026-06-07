@@ -133,3 +133,29 @@ class TestStartCommandParser:
         args = parser.parse_args(["start"])
         assert args.command == "start"
         assert hasattr(args, "db_path")  # from the parser-level arg
+
+    def test_start_with_dry_run(self):
+        """`start --dry-run` should set dry_run=True."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        start_parser = subparsers.add_parser("start")
+        start_parser.add_argument("--dry-run", action="store_true")
+        start_parser.add_argument("--db-path", default="bridge.db")
+
+        args = parser.parse_args(["start", "--dry-run"])
+        assert args.command == "start"
+        assert args.dry_run is True
+
+        # Without --dry-run, should be False
+        args = parser.parse_args(["start"])
+        assert args.dry_run is False
+
+    def test_legacy_top_level_dry_run(self):
+        """Legacy top-level --dry-run should be accepted."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--dry-run", action="store_true")
+
+        args = parser.parse_args(["--dry-run"])
+        assert args.dry_run is True

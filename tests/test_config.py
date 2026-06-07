@@ -4,32 +4,36 @@ import json
 import tempfile
 from pathlib import Path
 
-from agent_bridge.config import BridgeConfig, BUILTIN_SKILLS, CONFIG_PATHS
+from agent_bridge.config import BridgeConfig, get_builtin_skills, CONFIG_PATHS
 
 
 class TestBuiltinSkills:
     def test_architect_has_plan_tools(self):
-        skill = BUILTIN_SKILLS["architect"]
+        skills = get_builtin_skills()
+        skill = skills["architect"]
         assert "plan.create" in skill.allowed_tools
         assert "review.approve" in skill.allowed_tools
         assert "task.claim" not in skill.allowed_tools  # dev-only
         assert "task.submit_work" not in skill.allowed_tools  # dev-only
 
     def test_developer_has_task_tools(self):
-        skill = BUILTIN_SKILLS["developer"]
+        skills = get_builtin_skills()
+        skill = skills["developer"]
         assert "task.claim" in skill.allowed_tools
         assert "task.submit_work" in skill.allowed_tools
         assert "review.approve" not in skill.allowed_tools  # arch-only
         assert "task.get_diff" not in skill.allowed_tools  # arch-only
 
     def test_default_has_minimal_tools(self):
-        skill = BUILTIN_SKILLS["default"]
+        skills = get_builtin_skills()
+        skill = skills["default"]
         assert "hello" in skill.allowed_tools
         assert "chat.send" in skill.allowed_tools
         assert "plan.create" not in skill.allowed_tools
 
     def test_all_skills_have_heartbeat(self):
-        for name, skill in BUILTIN_SKILLS.items():
+        skills = get_builtin_skills()
+        for name, skill in skills.items():
             assert "agent.heartbeat" in skill.allowed_tools, f"{name} missing heartbeat"
 
 

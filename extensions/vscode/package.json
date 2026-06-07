@@ -1,0 +1,187 @@
+{
+  "name": "agent-bridge",
+  "displayName": "Agent Bridge",
+  "description": "Multi-agent collaboration hub in VS Code — manage architect + developer agents via MCP",
+  "version": "0.1.0",
+  "publisher": "gentleman-programming",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "mcp",
+    "agent",
+    "multi-agent",
+    "collaboration",
+    "claude-code",
+    "opencode"
+  ],
+  "icon": "icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-bridge",
+          "title": "Agent Bridge",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "agent-bridge": [
+        {
+          "id": "agent-bridge.agents",
+          "name": "Agents",
+          "type": "tree"
+        },
+        {
+          "id": "agent-bridge.kanban",
+          "name": "Kanban",
+          "type": "tree"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agent-bridge.start",
+        "title": "Agent Bridge: Start Server"
+      },
+      {
+        "command": "agent-bridge.stop",
+        "title": "Agent Bridge: Stop Server"
+      },
+      {
+        "command": "agent-bridge.restart",
+        "title": "Agent Bridge: Restart Server"
+      },
+      {
+        "command": "agent-bridge.openChat",
+        "title": "Agent Bridge: Open Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agent-bridge.connectAgent",
+        "title": "Agent Bridge: Connect as Agent…",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "agent-bridge.disconnectAgent",
+        "title": "Agent Bridge: Disconnect Agent"
+      },
+      {
+        "command": "agent-bridge.claimTask",
+        "title": "Agent Bridge: Claim Task…"
+      },
+      {
+        "command": "agent-bridge.submitWork",
+        "title": "Agent Bridge: Submit Work…"
+      },
+      {
+        "command": "agent-bridge.newTerminal",
+        "title": "Agent Bridge: New Agent Terminal",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "agent-bridge.showMenu",
+        "title": "Agent Bridge: Quick Menu"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "agent-bridge.start"
+        },
+        {
+          "command": "agent-bridge.stop"
+        },
+        {
+          "command": "agent-bridge.restart"
+        },
+        {
+          "command": "agent-bridge.openChat"
+        },
+        {
+          "command": "agent-bridge.connectAgent"
+        },
+        {
+          "command": "agent-bridge.disconnectAgent"
+        },
+        {
+          "command": "agent-bridge.claimTask"
+        },
+        {
+          "command": "agent-bridge.submitWork"
+        },
+        {
+          "command": "agent-bridge.newTerminal"
+        },
+        {
+          "command": "agent-bridge.showMenu"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "agent-bridge.openChat",
+          "when": "view == agent-bridge.agents",
+          "group": "navigation"
+        },
+        {
+          "command": "agent-bridge.newTerminal",
+          "when": "view == agent-bridge.agents",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent Bridge",
+      "properties": {
+        "agent-bridge.port": {
+          "type": "number",
+          "default": 8765,
+          "description": "Port for the MCP SSE server"
+        },
+        "agent-bridge.dbPath": {
+          "type": "string",
+          "default": "bridge.db",
+          "description": "Path to the SQLite database (relative to workspace root)"
+        },
+        "agent-bridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-start the bridge server when VS Code opens"
+        },
+        "agent-bridge.pollIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "description": "Polling interval for agent heartbeats and chat messages"
+        },
+        "agent-bridge.terminals.autoCreate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-create terminals for configured agents on connect"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "eslint": "^8.0.0"
+  },
+  "dependencies": {}
+}

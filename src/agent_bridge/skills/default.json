@@ -1,0 +1,27 @@
+{
+  "name": "default",
+  "version": 1,
+  "description": "Skill por defecto — solo chat y presencia",
+  "allowed_tools": [
+    "chat.send",
+    "chat.read",
+    "chat.thread_create",
+    "chat.thread_list",
+    "chat.thread_get_pending",
+    "chat.thread_resolve",
+    "chat.mark_read",
+    "agent.heartbeat",
+    "agent.list",
+    "agent.get",
+    "agent.whoami",
+    "skill.list",
+    "skill.get",
+    "hello"
+  ],
+  "instructions": [
+    "Eres un agente con permisos limitados.",
+    "Solo puedes usar chat y consultar estado.",
+    "Contacta al administrador para asignarte un rol."
+  ],
+  "restrictions": {}
+}

@@ -22,13 +22,17 @@ import mcp.types as types
 
 from agent_bridge.state.database import Database
 
+
 # Exceptions raised inside with_transaction() callbacks to signal *why* a
 # send was rejected.  Catch order: _ThreadResolvedError → _TurnClaimError,
 # so callers can return the correct error message.
 class _TurnClaimError(Exception):
     """Turn was not available — wrong sender (current_turn didn't match)."""
+
+
 class _ThreadResolvedError(_TurnClaimError):
     """Thread was already resolved — more specific than generic turn failure."""
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,16 @@ TARGET_ROLE_MAP: dict[str, str] = {
     "arquitecto": "architect",
     "desarrollador": "developer",
 }
+
+# Valid message types for the enhanced messaging schema
+VALID_MSG_TYPES = [
+    "chat", "task_assignment", "status_update", "dependency_notification",
+    "idle_notification", "shutdown_request", "shutdown_approved", "system", "ping",
+]
+
+VALID_PRIORITIES = ["normal", "high", "urgent"]
+
+MAX_MESSAGE_LENGTH = 4000
 
 CHAT_TOOLS = [
     types.Tool(
@@ -59,6 +73,16 @@ CHAT_TOOLS = [
                     "type": "string",
                     "description": "Thread ID for replies",
                 },
+                "msg_type": {
+                    "type": "string",
+                    "description": "Message type (chat, status_update, ping, etc.)",
+                    "default": "chat",
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority (normal, high, urgent)",
+                    "default": "normal",
+                },
             },
             "required": ["text"],
         },
@@ -75,7 +99,36 @@ CHAT_TOOLS = [
                     "type": "string",
                     "description": "Filter by @mention target",
                 },
+                "msg_type": {
+                    "type": "string",
+                    "description": "Filter by message type (chat, status_update, etc.)",
+                },
+                "unread_only": {
+                    "type": "boolean",
+                    "description": "Show only unread messages",
+                    "default": False,
+                },
+                "priority_first": {
+                    "type": "boolean",
+                    "description": "Show urgent/high priority messages first",
+                    "default": False,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max messages to return (default: no limit)",
+                },
             },
+        },
+    ),
+    types.Tool(
+        name="chat.mark_read",
+        description="Mark a specific message as read",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string", "description": "Message ID to mark as read"},
+            },
+            "required": ["message_id"],
         },
     ),
     types.Tool(
@@ -88,7 +141,7 @@ CHAT_TOOLS = [
                 "participants": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of participants (e.g. [\"arquitecto\", \"desarrollador\"]). Empty = public thread.",
+                    "description": 'Participants (e.g. ["arquitecto", "desarrollador"]). Empty = public thread.',
                 },
             },
             "required": ["title"],
@@ -126,13 +179,13 @@ CHAT_TOOLS = [
 ]
 
 
-async def handle_chat_tool(
-    db: Database, name: str, args: dict
-) -> list[types.TextContent] | None:
+async def handle_chat_tool(db: Database, name: str, args: dict) -> list[types.TextContent] | None:
     if name == "chat.send":
         return await _send_message(db, args)
     elif name == "chat.read":
         return await _read_messages(db, args)
+    elif name == "chat.mark_read":
+        return await _mark_read(db, args)
     elif name == "chat.thread_create":
         return await _create_thread(db, args)
     elif name == "chat.thread_list":
@@ -178,42 +231,69 @@ def _advance_turn(participants: list[str], current_sender: str) -> str | None:
     return None  # caller interprets None as "don't change"
 
 
-async def _send_message(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _send_message(db: Database, args: dict) -> list[types.TextContent]:
     text = args.get("text", "")
-    sender = args.get("sender", "human")
+    sender = args.get("sender") or args.get("_sender_name") or "human"
     target = args.get("target")
     thread_id = args.get("thread_id")
+    msg_type = args.get("msg_type", "chat")
+    priority = args.get("priority", "normal")
 
     if not text:
-        return [types.TextContent(type="text", text='{"error": "text required"}')]
+        return [types.TextContent(type="text", text=json.dumps({"error": "text required"}))]
+
+    if len(text) > MAX_MESSAGE_LENGTH:
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps({"error": "message_too_long", "max_length": MAX_MESSAGE_LENGTH}),
+            )
+        ]
+
+    if msg_type not in VALID_MSG_TYPES:
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps({"error": "invalid_msg_type", "valid_types": VALID_MSG_TYPES}),
+            )
+        ]
+
+    if priority not in VALID_PRIORITIES:
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps({"error": "invalid_priority", "valid_priorities": VALID_PRIORITIES}),
+            )
+        ]
 
     # ── Thread validation (pre-check — fast path, may be stale) ─────
     has_participants = False
     participants: list[str] = []
     if thread_id:
-        thread = await db.execute_one(
-            "SELECT * FROM threads WHERE id = ?", (thread_id,)
-        )
+        thread = await db.execute_one("SELECT * FROM threads WHERE id = ?", (thread_id,))
         if thread is None:
-            return [types.TextContent(type="text", text=json.dumps({"error": "thread_not_found", "detail": "El thread no existe"}))]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "thread_not_found", "detail": "El thread no existe"}),
+                )
+            ]
 
-        # Pre-check for resolved — catches the common case before any write.
-        # A concurrent resolve that lands after this point is detected inside
-        # the atomic transaction via _ThreadResolvedError.
         if thread["status"] == "resolved":
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": "thread_resolved", "detail": "El thread ya está resuelto"}),
-            )]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "thread_resolved", "detail": "El thread ya está resuelto"}),
+                )
+            ]
 
         participants = _parse_participants(thread)
         if participants:
             has_participants = True
-            # Snapshot the turn value at pre-check time, before any write.
-            # Used inside the transaction to reject cross-participant races
-            # where the sender didn't hold the turn at request time.
+            # Snapshot the turn at request time, used inside the write lock to
+            # reject line-cutting: a participant who did NOT have the turn at
+            # request time cannot sneak through when the turn cycles back to
+            # them while they wait for the write lock.
             pre_check_turn = thread["current_turn"]
 
     msg_id = str(uuid.uuid4())
@@ -237,19 +317,17 @@ async def _send_message(
         next_turn = _advance_turn(participants, sender)
 
         def _participant_sync(conn):
-            # 1a. Re-check thread status inside the write lock
-            cur = conn.execute(
-                "SELECT status FROM threads WHERE id = ?", (thread_id,)
-            )
+            # Re-check thread status inside the write lock to catch
+            # concurrent resolves that snuck past the pre-check.
+            cur = conn.execute("SELECT status FROM threads WHERE id = ?", (thread_id,))
             row = cur.fetchone()
             if row is None:
                 raise _TurnClaimError()
             if row["status"] == "resolved":
                 raise _ThreadResolvedError()
 
-            # 1b. Atomically claim the turn.
-            #
-            # The WHERE clause prevents TWO distinct races:
+            # Atomically claim the turn.
+            # The pre_check_turn prevents TWO distinct races:
             #   (i)  Send-vs-resolve:   status = 'open' catches this.
             #   (ii) Cross-participant: current_turn must match the
             #        *pre-check* value AND the sender must have been
@@ -257,16 +335,6 @@ async def _send_message(
             #        did NOT have the turn at request time from
             #        "cutting in line" when the turn cycles back to
             #        them while they waited for the write lock.
-            #
-            # Semantics:
-            #   ? IS NULL
-            #     → pre_check_turn was NULL → first message → anyone can
-            #       start (benign race, both participants get through).
-            #   current_turn = ? AND ? = ?
-            #     → turn hasn't changed SINCE pre-check AND the sender
-            #       was the expected speaker at pre-check time.  This
-            #       prevents a participant from "cutting in line" when
-            #       the turn cycles back to them while they waited.
             cur = conn.execute(
                 """UPDATE threads
                    SET current_turn = ?, last_activity_at = datetime('now')
@@ -283,43 +351,45 @@ async def _send_message(
             # 1c. Insert the message
             conn.execute(
                 """INSERT INTO messages
-                       (id, thread_id, sender, target, text, turn_number)
-                   VALUES (?, ?, ?, ?, ?,
+                       (id, thread_id, sender, target, text, msg_type, priority, turn_number)
+                   VALUES (?, ?, ?, ?, ?, ?, ?,
                      (SELECT COALESCE(MAX(turn_number), 0) + 1
                         FROM messages WHERE thread_id = ?)
                    )""",
-                (msg_id, thread_id, sender, target, text, thread_id),
+                (msg_id, thread_id, sender, target, text, msg_type, priority, thread_id),
             )
 
             # 1d. Read back the assigned turn_number
-            cur = conn.execute(
-                "SELECT turn_number FROM messages WHERE id = ?", (msg_id,)
-            )
+            cur = conn.execute("SELECT turn_number FROM messages WHERE id = ?", (msg_id,))
             row = cur.fetchone()
             return row[0] if row is not None else None
 
         try:
             turn_number = await db.with_transaction(_participant_sync)
         except _ThreadResolvedError:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
-            )]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
+                )
+            ]
         except _TurnClaimError:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({
-                    "error": "not_your_turn",
-                    "detail": "El turno ya fue tomado por otro mensaje concurrente",
-                }),
-            )]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "error": "not_your_turn",
+                            "detail": "El turno ya fue tomado por otro mensaje concurrente",
+                        }
+                    ),
+                )
+            ]
 
     elif has_participants:
         # Non-participant (e.g. human) — allow without changing turn.
         def _non_participant_sync(conn):
-            cur = conn.execute(
-                "SELECT status FROM threads WHERE id = ?", (thread_id,)
-            )
+            cur = conn.execute("SELECT status FROM threads WHERE id = ?", (thread_id,))
             row = cur.fetchone()
             if row is None:
                 raise _TurnClaimError()
@@ -331,26 +401,27 @@ async def _send_message(
                 (thread_id,),
             )
             conn.execute(
-                "INSERT INTO messages (id, thread_id, sender, target, text) VALUES (?, ?, ?, ?, ?)",
-                (msg_id, thread_id, sender, target, text),
+                "INSERT INTO messages (id, thread_id, sender, target, text, "
+                "msg_type, priority) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, thread_id, sender, target, text, msg_type, priority),
             )
             return None
 
         try:
             await db.with_transaction(_non_participant_sync)
         except _ThreadResolvedError:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
-            )]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
+                )
+            ]
 
     else:
         # Thread without participants — no turn-taking.
         def _public_sync(conn):
             if thread_id:
-                cur = conn.execute(
-                    "SELECT status FROM threads WHERE id = ?", (thread_id,)
-                )
+                cur = conn.execute("SELECT status FROM threads WHERE id = ?", (thread_id,))
                 row = cur.fetchone()
                 if row is None:
                     raise _TurnClaimError()
@@ -358,8 +429,9 @@ async def _send_message(
                     raise _ThreadResolvedError()
 
             conn.execute(
-                "INSERT INTO messages (id, thread_id, sender, target, text) VALUES (?, ?, ?, ?, ?)",
-                (msg_id, thread_id, sender, target, text),
+                "INSERT INTO messages (id, thread_id, sender, target, text, "
+                "msg_type, priority) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (msg_id, thread_id, sender, target, text, msg_type, priority),
             )
             if thread_id:
                 conn.execute(
@@ -371,10 +443,12 @@ async def _send_message(
         try:
             await db.with_transaction(_public_sync)
         except _ThreadResolvedError:
-            return [types.TextContent(
-                type="text",
-                text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
-            )]
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "thread_resolved", "detail": "El thread fue resuelto concurrentemente"}),
+                )
+            ]
 
     # ── @mention presence routing ──────────────────────────────────
     warning = None
@@ -392,15 +466,9 @@ async def _send_message(
             if any_agent:
                 status = any_agent["status"]
                 last_seen = _format_timestamp(any_agent["last_seen"])
-                warning = (
-                    f"El {target} está {status} desde las {last_seen}. "
-                    "El mensaje quedó en su inbox."
-                )
+                warning = f"El {target} está {status} desde las {last_seen}. El mensaje quedó en su inbox."
             else:
-                warning = (
-                    f"El {target} no está registrado. "
-                    "El mensaje quedó en su inbox."
-                )
+                warning = f"El {target} no está registrado. El mensaje quedó en su inbox."
 
     logger.info("Message from %s: %s", sender, text[:60])
 
@@ -413,14 +481,16 @@ async def _send_message(
     return [types.TextContent(type="text", text=json.dumps(response))]
 
 
-async def _read_messages(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _read_messages(db: Database, args: dict) -> list[types.TextContent]:
     thread_id = args.get("thread_id")
     since = args.get("since")
     target = args.get("target")
+    msg_type_filter = args.get("msg_type")
+    unread_only = args.get("unread_only", False)
+    priority_first = args.get("priority_first", False)
+    limit = args.get("limit")
 
-    query = "SELECT * FROM messages WHERE 1=1"
+    query = "SELECT rowid, * FROM messages WHERE 1=1"
     params: list = []
 
     if thread_id:
@@ -428,39 +498,71 @@ async def _read_messages(
         params.append(thread_id)
 
     if since:
-        query += " AND id > ?"
-        params.append(since)
+        # Accept numeric rowid (preferred) or legacy UUID string.
+        # UUIDs compared as strings do NOT sort chronologically,
+        # which causes the TUI to miss messages when polling.
+        try:
+            since_rowid = int(since)
+            query += " AND rowid > ?"
+            params.append(since_rowid)
+        except ValueError:
+            # Backward-compat: lookup rowid by UUID
+            query += " AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?), -1)"
+            params.append(since)
 
     if target:
         # Include messages directed TO target PLUS public messages (no target)
         query += " AND (target = ? OR target IS NULL)"
         params.append(target)
 
-    # Causal ordering by rowid (insertion order).  Every INSERT runs inside
-    # with_transaction (or a serialized write), so rowid reflects the true
-    # causal sequence regardless of sender type (participant / human / system)
-    # or whether the message has a turn_number.
-    query += " ORDER BY rowid ASC"
+    if msg_type_filter:
+        query += " AND msg_type = ?"
+        params.append(msg_type_filter)
+
+    if unread_only:
+        query += " AND read = 0"
+
+    # Ordering: priority_first then causal
+    if priority_first:
+        query += (
+            " ORDER BY"
+            "   CASE priority"
+            "     WHEN 'urgent' THEN 0"
+            "     WHEN 'high' THEN 1"
+            "     ELSE 2"
+            "   END,"
+            "   rowid ASC"
+        )
+    else:
+        query += " ORDER BY rowid ASC"
+
+    if limit:
+        query += " LIMIT ?"
+        params.append(limit)
 
     rows = await db.execute(query, tuple(params))
-    messages = [
-        {
-            "id": r["id"],
-            "thread_id": r["thread_id"],
-            "sender": r["sender"],
-            "target": r["target"],
-            "text": r["text"],
-            "turn_number": r["turn_number"],
-            "created_at": r["created_at"],
-        }
-        for r in rows
-    ]
+    messages = []
+    for r in rows:
+        messages.append(
+            {
+                "rowid": r["rowid"],
+                "id": r["id"],
+                "thread_id": r["thread_id"],
+                "sender": r["sender"],
+                "target": r["target"],
+                "text": r["text"],
+                "msg_type": r["msg_type"],
+                "priority": r["priority"],
+                "read": bool(r["read"]),
+                "turn_number": r["turn_number"],
+                "created_at": r["created_at"],
+            }
+        )
+
     return [types.TextContent(type="text", text=json.dumps(messages))]
 
 
-async def _create_thread(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _create_thread(db: Database, args: dict) -> list[types.TextContent]:
     title = args.get("title", "Untitled Thread")
     participants = args.get("participants", [])
     thread_id = str(uuid.uuid4())
@@ -485,7 +587,8 @@ async def _create_thread(
 
 async def _list_threads(db: Database) -> list[types.TextContent]:
     rows = await db.execute(
-        "SELECT id, title, status, participants, current_turn, last_activity_at, created_at FROM threads ORDER BY created_at DESC"
+        "SELECT id, title, status, participants, current_turn, last_activity_at, created_at "
+        "FROM threads ORDER BY created_at DESC"
     )
     threads = []
     for r in rows:
@@ -501,9 +604,7 @@ async def _list_threads(db: Database) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps(threads))]
 
 
-async def _thread_get_pending(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _thread_get_pending(db: Database, args: dict) -> list[types.TextContent]:
     """Return open threads where the given agent's participation is expected."""
     agent_name = args.get("agent_name")
     if not agent_name:
@@ -515,56 +616,83 @@ async def _thread_get_pending(
         """SELECT * FROM threads
            WHERE status = 'open'
              AND participants != '[]'
-             AND INSTR(participants, ?) > 0
-             AND (current_turn IS NULL OR current_turn = ?)
-           ORDER BY last_activity_at DESC""",
-        (json.dumps(agent_name), agent_name),
+           ORDER BY last_activity_at DESC"""
     )
 
     pending = []
     for r in rows:
-        pending.append({
-            "id": r["id"],
-            "title": r["title"],
-            "participants": _parse_participants(r),
-            "current_turn": r["current_turn"],
-            "last_activity_at": r["last_activity_at"],
-        })
+        p = _parse_participants(r)
+        if agent_name not in p:
+            continue
+        turn = r["current_turn"]
+
+        # When current_turn is NULL, distinguish "just created (no activity)"
+        # from "activity without turn assignment".  A thread whose
+        # last_activity_at equals its created_at has no messages yet.
+        if turn is None and r["last_activity_at"] == r["created_at"]:
+            continue
+
+        if turn is not None and turn != agent_name:
+            continue
+        pending.append(
+            {
+                "id": r["id"],
+                "title": r["title"],
+                "participants": p,
+                "current_turn": turn,
+                "last_activity_at": r["last_activity_at"],
+            }
+        )
 
     return [types.TextContent(type="text", text=json.dumps(pending))]
 
 
-async def _resolve_thread(
-    db: Database, args: dict
-) -> list[types.TextContent]:
+async def _resolve_thread(db: Database, args: dict) -> list[types.TextContent]:
     """Manually resolve (close) a discussion thread."""
     thread_id = args.get("thread_id")
     if not thread_id:
         return [types.TextContent(type="text", text=json.dumps({"error": "thread_id required"}))]
 
-    thread = await db.execute_one(
-        "SELECT * FROM threads WHERE id = ?", (thread_id,)
-    )
+    thread = await db.execute_one("SELECT * FROM threads WHERE id = ?", (thread_id,))
     if thread is None:
         return [types.TextContent(type="text", text=json.dumps({"error": "thread not found"}))]
 
     if thread["status"] == "resolved":
-        return [types.TextContent(
-            type="text",
-            text=json.dumps({"thread_id": thread_id, "status": "resolved", "note": "Thread was already resolved"}),
-        )]
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps({"thread_id": thread_id, "status": "resolved", "note": "Thread was already resolved"}),
+            )
+        ]
 
     won = await db.resolve_thread_atomic(thread_id, "Thread resolved by participant.")
 
     if won:
-        return [types.TextContent(
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps({"thread_id": thread_id, "status": "resolved"}),
+            )
+        ]
+    return [
+        types.TextContent(
             type="text",
-            text=json.dumps({"thread_id": thread_id, "status": "resolved"}),
-        )]
-    return [types.TextContent(
-        type="text",
-        text=json.dumps({
-            "thread_id": thread_id, "status": "resolved",
-            "note": "Thread was already resolved (concurrent resolve won)",
-        }),
-    )]
+            text=json.dumps(
+                {
+                    "thread_id": thread_id,
+                    "status": "resolved",
+                    "note": "Thread was already resolved (concurrent resolve won)",
+                }
+            ),
+        )
+    ]
+
+
+async def _mark_read(db: Database, args: dict) -> list[types.TextContent]:
+    """Mark a specific message as read."""
+    message_id = args.get("message_id")
+    if not message_id:
+        return [types.TextContent(type="text", text=json.dumps({"error": "message_id required"}))]
+
+    await db.mark_message_read(message_id)
+    return [types.TextContent(type="text", text=json.dumps({"message_id": message_id, "status": "marked_read"}))]

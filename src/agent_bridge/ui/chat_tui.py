@@ -11,13 +11,11 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime
 from typing import Any
 
 from rich.markup import escape as rich_escape
-from rich.table import Table
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
@@ -33,15 +31,15 @@ _MENTIONS = ["@arquitecto", "@desarrollador", "@humano", "@all"]
 _COMMANDS = ["/clear", "/help"]
 
 _HELP_ROWS = [
-    ("Mención",      "@arquitecto",   "Enviar mensaje al Arquitecto"),
-    ("Mención",      "@desarrollador","Enviar mensaje al Desarrollador"),
-    ("Mención",      "@humano",       "Enviar mensaje al humano"),
-    ("Mención",      "@all",          "Enviar mensaje a todos"),
-    ("Comando",      "/clear",        "Limpiar la pantalla (no borra la DB)"),
-    ("Comando",      "/help",         "Mostrar esta tabla de ayuda"),
-    ("Atajo",        "Ctrl+L",        "Limpiar la pantalla"),
-    ("Atajo",        "F1",            "Mostrar / ocultar panel de ayuda rápida"),
-    ("Atajo",        "Tab / →",       "Aceptar autocompletado"),
+    ("Mención", "@arquitecto", "Enviar mensaje al Arquitecto"),
+    ("Mención", "@desarrollador", "Enviar mensaje al Desarrollador"),
+    ("Mención", "@humano", "Enviar mensaje al humano"),
+    ("Mención", "@all", "Enviar mensaje a todos"),
+    ("Comando", "/clear", "Limpiar la pantalla (no borra la DB)"),
+    ("Comando", "/help", "Mostrar esta tabla de ayuda"),
+    ("Atajo", "Ctrl+L", "Limpiar la pantalla"),
+    ("Atajo", "F1", "Mostrar / ocultar panel de ayuda rápida"),
+    ("Atajo", "Tab / →", "Aceptar autocompletado"),
 ]
 
 
@@ -78,41 +76,48 @@ class MCPClient:
     def __init__(
         self,
         db_path: str = "bridge.db",
+        dry_run: bool = False,
+        request_timeout: int = 120,
         on_reconnecting=None,
         on_reconnected=None,
     ) -> None:
         self.db_path = db_path
+        self.dry_run = dry_run
+        self._request_timeout = request_timeout
         self._process: asyncio.subprocess.Process | None = None
         self._msg_id = 1
         self._initialized = False
         self._lock = asyncio.Lock()  # one request in flight at a time
         self._on_reconnecting = on_reconnecting  # async callable(n_attempt)
-        self._on_reconnected = on_reconnected    # async callable()
+        self._on_reconnected = on_reconnected  # async callable()
 
     async def connect(self) -> None:
         """Spawn the MCP server and perform the initialize handshake."""
-        env = {**os.environ, "AGENT_BRIDGE_ID": "human-ui"}
-        self._process = await asyncio.create_subprocess_exec(
+        args = [
             sys.executable,
             "-m",
             "agent_bridge",
             "--db-path",
             self.db_path,
+        ]
+        if self.dry_run:
+            args.append("--dry-run")
+        self._process = await asyncio.create_subprocess_exec(
+            *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
         )
 
-        resp = await self._request("initialize", {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "agent-bridge-ui", "version": "0.1.0"},
-        })
+        resp = await self._request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "agent-bridge-ui", "version": "0.1.0"},
+            },
+        )
         if resp is None or "result" not in resp:
-            raise ConnectionError(
-                f"MCP initialize failed: {resp}"
-            )
+            raise ConnectionError(f"MCP initialize failed: {resp}")
         self._initialized = True
 
     async def close(self) -> None:
@@ -121,7 +126,7 @@ class MCPClient:
             self._process.terminate()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
                 await self._process.wait()
 
@@ -165,10 +170,13 @@ class MCPClient:
         if not connected:
             return None
 
-        resp = await self._request("tools/call", {
-            "name": name,
-            "arguments": arguments or {},
-        })
+        resp = await self._request(
+            "tools/call",
+            {
+                "name": name,
+                "arguments": arguments or {},
+            },
+        )
         if resp is None:
             return None
         if "result" in resp:
@@ -202,14 +210,12 @@ class MCPClient:
             self._process.stdin.write(data.encode("utf-8"))
             await self._process.stdin.drain()
 
-            response_bytes = await asyncio.wait_for(
-                self._process.stdout.readline(), timeout=30
-            )
+            response_bytes = await asyncio.wait_for(self._process.stdout.readline(), timeout=self._request_timeout)
             if not response_bytes:
                 self._initialized = False
                 return None
             return json.loads(response_bytes.decode("utf-8"))
-        except (BrokenPipeError, OSError, asyncio.TimeoutError):
+        except (TimeoutError, BrokenPipeError, OSError):
             self._initialized = False
             return None
 
@@ -290,16 +296,18 @@ class ChatTUI(App):
 
     BINDINGS = [
         Binding("ctrl+l", "clear_log", "Limpiar pantalla"),
-        Binding("f1",     "toggle_help", "Ayuda"),
+        Binding("f1", "toggle_help", "Ayuda"),
     ]
 
     agent_status: reactive[dict[str, str]] = reactive({})
 
-    def __init__(self, db_path: str = "bridge.db") -> None:
+    def __init__(self, db_path: str = "bridge.db", dry_run: bool = False) -> None:
         super().__init__()
         self.db_path = db_path
+        self.dry_run = dry_run
         self._client = MCPClient(
             db_path,
+            dry_run=dry_run,
             on_reconnecting=self._on_reconnecting,
             on_reconnected=self._on_reconnected,
         )
@@ -372,6 +380,8 @@ class ChatTUI(App):
         params: dict[str, Any] = {}
         if self._known_id:
             params["since"] = self._known_id
+        else:
+            params["limit"] = 100  # Cap initial load
         result = await self._client.call_tool("chat.read", params)
         if result is None:
             return
@@ -447,7 +457,7 @@ class ChatTUI(App):
             "[bold]Referencia rápida[/bold]  [dim](F1 para cerrar)[/dim]",
             "",
             f"  [bold cyan]{'Tipo':<10}{'Token / Atajo':<18}Descripción[/bold cyan]",
-            f"  [dim]{'─'*10}{'─'*18}{'─'*32}[/dim]",
+            f"  [dim]{'─' * 10}{'─' * 18}{'─' * 32}[/dim]",
         ]
         type_color = {"Mención": "green", "Comando": "yellow", "Atajo": "blue"}
         for kind, token, desc in _HELP_ROWS:
@@ -492,24 +502,28 @@ class ChatTUI(App):
     @staticmethod
     def _format_time(iso_str: str) -> str:
         """Format ISO timestamp to HH:MM in local time."""
+        from datetime import timezone
+
         if not iso_str:
             return ""
         try:
             dt = datetime.fromisoformat(iso_str)
-            if dt.tzinfo is not None:
-                dt = dt.astimezone()  # UTC → local timezone
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone()
             return dt.strftime("%H:%M")
         except (ValueError, TypeError):
             return iso_str[:5] if len(iso_str) >= 5 else iso_str
 
 
-def main(db_path: str = "bridge.db") -> None:
+def main(db_path: str = "bridge.db", dry_run: bool = False) -> None:
     """Launch the chat TUI."""
-    app = ChatTUI(db_path=db_path)
+    app = ChatTUI(db_path=db_path, dry_run=dry_run)
     app.run()
 
 
 if __name__ == "__main__":
     import sys
+
     db_path = sys.argv[1] if len(sys.argv) > 1 else "bridge.db"
     main(db_path)

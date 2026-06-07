@@ -240,3 +240,157 @@ class TestStdioIntegration:
             for p in (arch_proc, dev_proc):
                 p.terminate()
                 p.wait()
+
+
+class TestSSEIntegration:
+    """Integration tests via SSE transport (HTTP)."""
+
+    @pytest.fixture
+    def db_path(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        yield path
+        Path(path).unlink(missing_ok=True)
+        Path(path + ".lock").unlink(missing_ok=True)
+
+    def test_sse_initialize_and_list_tools(self, db_path):
+        """SSE handshake: connect → initialize → tools/list via async SSE."""
+        import time
+
+        import anyio
+
+        # Write stderr to a file so the subprocess never blocks on pipe buffer
+        err_path = db_path + ".sse.err"
+        proc = subprocess.Popen(
+            [*BRIDGE_CLI, "start", "--headless", "--db-path", db_path, "--port", "9877"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=open(err_path, "w"),
+        )
+
+        try:
+            time.sleep(3)
+            if proc.poll() is not None:
+                with open(err_path) as f:
+                    err = f.read()
+                pytest.fail(f"SSE server exited early. stderr:\n{err[:1000]}")
+
+            # Debug: verify process is running before test
+            with open(err_path) as f:
+                startup_log = f.read()
+            assert proc.poll() is None, f"Process died after 3s. Log:\n{startup_log[:500]}"
+
+            anyio.run(self._sse_run_test, db_path, err_path)
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            # Clean up stderr log
+            try:
+                Path(err_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def _sse_run_test(self, db_path, err_path=None):
+        """Async SSE test: connect → initialize → tools/list."""
+        import anyio
+        import httpx
+
+        url = "http://127.0.0.1:9877"
+        session_id: str | None = None
+        responses: dict[int, dict] = {}
+
+        # Wait for server to be live — use streaming to avoid blocking
+        # on the infinite SSE stream.
+        async with httpx.AsyncClient(timeout=5) as c:
+            for _ in range(30):
+                try:
+                    async with c.stream("GET", f"{url}/sse") as sse:
+                        # If we got here without exception, server is alive
+                        # and returned 200. We don't need to read anything yet.
+                        break
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError):
+                    await anyio.sleep(0.3)
+            else:
+                if err_path:
+                    try:
+                        with open(err_path) as f:
+                            err = f.read()
+                        pytest.fail(f"SSE server did not start. stderr:\n{err[:500]}")
+                    except OSError:
+                        pass
+                pytest.fail("SSE server did not start in time")
+
+        # SSE event reader — runs as a background task
+        async def read_sse():
+            nonlocal session_id
+            async with httpx.AsyncClient(timeout=30) as c:
+                async with c.stream("GET", f"{url}/sse") as sse:
+                    async for line in sse.aiter_lines():
+                        # SSE format: event + data lines.
+                        # The session_id arrives as:
+                        #   event: endpoint
+                        #   data: /messages/?session_id=<id>
+                        if line.startswith("data: ") and "session_id" in line:
+                            # Extract session_id from path: /messages/?session_id=<id>
+                            data_val = line[6:]
+                            if "session_id=" in data_val:
+                                session_id = data_val.split("session_id=")[1].split("&")[0]
+                        elif line.startswith("data: "):
+                            try:
+                                msg = json.loads(line[6:])
+                            except json.JSONDecodeError:
+                                continue
+                            if "id" in msg:
+                                responses[msg["id"]] = msg
+
+        # Run SSE reader in background, POST in foreground
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(read_sse)
+
+            # Wait for session_id
+            for _ in range(50):
+                if session_id:
+                    break
+                await anyio.sleep(0.1)
+            assert session_id is not None, "No session_id received"
+
+            # POST initialize
+            async with httpx.AsyncClient(timeout=10) as c:
+                resp = await c.post(
+                    f"{url}/messages/?session_id={session_id}",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                          "params": {
+                              "protocolVersion": "2024-11-05",
+                              "capabilities": {},
+                              "clientInfo": {"name": "test", "version": "0.1.0"},
+                          }},
+                )
+                assert resp.status_code == 202
+
+                # POST tools/list
+                resp = await c.post(
+                    f"{url}/messages/?session_id={session_id}",
+                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                )
+                assert resp.status_code == 202
+
+            # Wait for tools/list response
+            for _ in range(100):
+                if 2 in responses:
+                    break
+                await anyio.sleep(0.1)
+
+            # Cancel background reader
+            tg.cancel_scope.cancel()
+
+        assert 2 in responses, f"No tools/list response. Got IDs: {list(responses.keys())}"
+        tools = responses[2]["result"]["tools"]
+        tool_names = [t["name"] for t in tools]
+        assert "hello" in tool_names
+        assert "plan.create" in tool_names
+        assert "chat.send" in tool_names
+        assert "agent.heartbeat" in tool_names
+        assert "agent.shutdown_request" in tool_names

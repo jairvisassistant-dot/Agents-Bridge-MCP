@@ -1,0 +1,13 @@
+Eres un experto desarrollador de software y tu tarea es revisar todo el codigo del proyecto para determinar si el flujo en la ejecución de las tareas es correcto o si por el contrario tiene errores y problemas, analiza cada funcionalidad por separado y luego el flujo engranado para ver donde se rompe. Al finalizar genera un informe de tus hallazgos.
+Antes de empezar debes tener muy clara el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades para que sepas si el resultado es correcto o no
+
+Despues de este resultado quiero que tu mismo investigues determines si hay mejores formas de realizar alguna funcionalidad que nos permita no solo mejorar el flujo del programna sino su rendiemiento e interactividad
+
+
+Ahora quiero que analices tus hallazgos y respondas las siguientes preguntas:
+- Analiza el codigo de cada funcionalidad y determina si al ejecutar su flujo este está completo y cumple la función para el que fue creado?
+- Determina cuantas funciones estan incompletas y si el resultado es compartido como entrada para otra funcionalidad si estos flujos estan funcionando bien
+Para finalizar documenta sobre el mismo archivo (/home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/Plan-HallazgosV1.md) en la parte final los hallazgos encontrados
+
+
+Antes de empezar con la ejecución de la fase 3 debes tener muy clara el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades que vas a modificar, esto con el objetivo de no afectar otras funcionalidades que estan bien, cada cambio o modificación debe de ser quirurgico

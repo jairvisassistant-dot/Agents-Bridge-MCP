@@ -1,11 +1,12 @@
 """Agent Bridge MCP server — core setup, permission layer, and tool registration."""
 
-import asyncio
 import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
+import anyio
 import mcp.types as types
 from mcp.server import Server
 
@@ -19,6 +20,9 @@ from agent_bridge.tools.skills import SKILL_TOOLS, handle_skill_tool
 from agent_bridge.tools.tasks import TASK_TOOLS, handle_task_tool
 
 logger = logging.getLogger(__name__)
+
+# ── Maintenance loop lifecycle ───────────────────────────────────
+_maintenance_scope: anyio.CancelScope | None = None
 
 # ── Hello-world tool ──────────────────────────────────────────────
 HELLO_TOOL = types.Tool(
@@ -41,11 +45,10 @@ ALL_TOOLS: list[types.Tool] = [
 
 # ── Permission layer ──────────────────────────────────────────────
 
-async def _check_permission(
-    tool_name: str, agent_id: str | None, config: BridgeConfig, db: Database
-) -> str | None:
+
+async def _check_permission(tool_name: str, agent_id: str | None, config: BridgeConfig, db: Database) -> str | None:
     """Check if the tool is allowed for the agent's role.
-    
+
     Returns None if allowed, or an error message string if denied.
 
     Identity resolution (in order):
@@ -59,49 +62,62 @@ async def _check_permission(
 
     # Agent must be identified via env var
     if not agent_id:
-        return json.dumps({
-            "error": "agent_not_identified",
-            "detail": "Set AGENT_BRIDGE_ID environment variable in this terminal "
-                      "(e.g. AGENT_BRIDGE_ID=claude-code-1 or AGENT_BRIDGE_ID=opencode-1). "
-                      "See bridge.json for available agent IDs.",
-        })
+        return json.dumps(
+            {
+                "error": "agent_not_identified",
+                "detail": "Set AGENT_BRIDGE_ID environment variable in this terminal "
+                "(e.g. AGENT_BRIDGE_ID=claude-code-1 or AGENT_BRIDGE_ID=opencode-1). "
+                "See bridge.json for available agent IDs.",
+            }
+        )
 
     # Resolve role: bridge.json first, then SQLite from heartbeat
     role = config.get_role_for_agent(agent_id)
     if role == "default":
-        row = await db.execute_one(
-            "SELECT role FROM agents WHERE agent_id = ?", (agent_id,)
-        )
+        row = await db.execute_one("SELECT role FROM agents WHERE agent_id = ?", (agent_id,))
         if row:
             role = row["role"]
 
     skill = config.get_skill_for_role(role)
 
     if tool_name not in skill.allowed_tools:
-        return json.dumps({
-            "error": "permission_denied",
-            "detail": f"Tool '{tool_name}' no está permitida para el rol '{role}'.",
-            "your_role": role,
-            "skill": skill.name,
-            "allowed_tools": skill.allowed_tools,
-        })
+        return json.dumps(
+            {
+                "error": "permission_denied",
+                "detail": f"Tool '{tool_name}' no está permitida para el rol '{role}'.",
+                "your_role": role,
+                "skill": skill.name,
+                "allowed_tools": skill.allowed_tools,
+            }
+        )
 
     return None
 
 
 # ── Stale agent reassignment ──────────────────────────────────────
 
+# Default thresholds (overridden by config.settings when available)
 STALE_AGENT_THRESHOLD_MINUTES = 5
 REASSIGN_INTERVAL_SECONDS = 60
 THREAD_TIMEOUT_MINUTES = 5
 
 
-async def _reassign_stale_tasks(db: Database) -> dict:
+def _get_offline_threshold(config: BridgeConfig | None) -> int:
+    """Get stale agent threshold in minutes from config, or fall back to default."""
+    if config is not None:
+        seconds = config.settings.get("offline_timeout_seconds", None)
+        if seconds is not None and isinstance(seconds, (int, float)):
+            return max(1, int(seconds // 60))
+    return STALE_AGENT_THRESHOLD_MINUTES
+
+
+async def _reassign_stale_tasks(db: Database, config: BridgeConfig | None = None) -> dict:
     """Find stale agents, mark them offline, reassign their in_progress tasks.
 
     Returns summary dict with stale agent IDs and reassign count.
     """
-    stale = await db.get_stale_agents(STALE_AGENT_THRESHOLD_MINUTES)
+    threshold = _get_offline_threshold(config)
+    stale = await db.get_stale_agents(threshold)
     if not stale:
         return {"stale_agents": [], "reassigned_count": 0}
 
@@ -116,7 +132,9 @@ async def _reassign_stale_tasks(db: Database) -> dict:
     if agent_ids:
         logger.info(
             "Reassigned %d stale task(s) from %d agent(s): %s",
-            total_reassigned, len(agent_ids), agent_ids,
+            total_reassigned,
+            len(agent_ids),
+            agent_ids,
         )
 
     return {"stale_agents": agent_ids, "reassigned_count": total_reassigned}
@@ -133,7 +151,7 @@ async def _resolve_stale_threads(db: Database) -> dict:
              AND participants != '[]'
              AND last_activity_at IS NOT NULL
              AND last_activity_at < datetime('now', ?)""",
-        (f'-{THREAD_TIMEOUT_MINUTES} minutes',),
+        (f"-{THREAD_TIMEOUT_MINUTES} minutes",),
     )
     if not stale:
         return {"resolved_count": 0}
@@ -151,32 +169,41 @@ async def _resolve_stale_threads(db: Database) -> dict:
     return {"resolved_count": resolved_count}
 
 
-async def _maintenance_loop(db: Database) -> None:
-    """Background task: reassign stale agents + resolve stale threads."""
+async def _maintenance_loop(db: Database, config: BridgeConfig | None = None) -> None:
+    """Background task: reassign stale agents + resolve stale threads.
+
+    Automatically restarts on unexpected errors. Only a cancellation
+    (CancelScope) stops the loop permanently.
+    """
+    threshold = _get_offline_threshold(config)
     logger.info(
         "Starting maintenance loop (interval=%ds, agent_threshold=%dmin, thread_timeout=%dmin)",
-        REASSIGN_INTERVAL_SECONDS, STALE_AGENT_THRESHOLD_MINUTES,
+        REASSIGN_INTERVAL_SECONDS,
+        threshold,
         THREAD_TIMEOUT_MINUTES,
     )
     while True:
         try:
-            await asyncio.sleep(REASSIGN_INTERVAL_SECONDS)
-            await _reassign_stale_tasks(db)
-            await _resolve_stale_threads(db)
-        except asyncio.CancelledError:
+            while True:
+                await anyio.sleep(REASSIGN_INTERVAL_SECONDS)
+                await _reassign_stale_tasks(db, config)
+                await _resolve_stale_threads(db)
+        except anyio.get_cancelled_exc_class():
             logger.info("Maintenance loop cancelled")
-            break
+            return
         except Exception:
-            logger.exception("Error in maintenance loop")
+            logger.exception("Maintenance loop crashed — restarting in 5s")
+            await anyio.sleep(5)
 
 
 # ── Server factory ────────────────────────────────────────────────
+
 
 def create_server(
     db_path: str = "bridge.db",
     agent_id: str | None = None,
     dry_run: bool = False,
-) -> tuple[Server, callable]:
+) -> tuple[Server, Callable[[], Awaitable[None]]]:
     """Create and configure the Agent Bridge MCP server.
 
     Args:
@@ -197,9 +224,7 @@ def create_server(
         return ALL_TOOLS
 
     @server.call_tool()
-    async def handle_call_tool(
-        name: str, arguments: dict | None
-    ) -> list[types.TextContent]:
+    async def handle_call_tool(name: str, arguments: dict | None) -> list[types.TextContent]:
         request_id = str(uuid.uuid4())
         args = arguments or {}
         start_time = time.monotonic()
@@ -209,6 +234,24 @@ def create_server(
             error = await _check_permission(name, agent_id, config, db)
             if error is not None:
                 return [types.TextContent(type="text", text=error)]
+
+            # ── Inject agent context into args ──────────────────
+            # So handlers (chat.send, task.claim, etc.) can use
+            # the agent's identity without relying on the caller.
+            args["_agent_id"] = agent_id
+            if agent_id:
+                role = config.get_role_for_agent(agent_id)
+                args["_agent_role"] = role
+                # Inject skill restrictions for enforcement
+                skill = config.get_skill_for_role(role)
+                args["_restrictions"] = skill.restrictions
+                # Friendly sender name for chat messages
+                sender_map = {"architect": "arquitecto", "developer": "desarrollador"}
+                args["_sender_name"] = sender_map.get(role, agent_id)
+            else:
+                args["_agent_role"] = None
+                args["_restrictions"] = {}
+                args["_sender_name"] = None
 
             # ── Tool dispatch ───────────────────────────────────
             if name == "hello":
@@ -238,17 +281,17 @@ def create_server(
             raise ValueError(f"Unknown tool: {name}")
 
         except Exception:
-            logger.exception(
-                "request_id=%s tool=%s Internal error", request_id, name
-            )
+            logger.exception("request_id=%s tool=%s Internal error", request_id, name)
             return [
                 types.TextContent(
                     type="text",
-                    text=json.dumps({
-                        "error": "internal_error",
-                        "detail": f"Error en tool '{name}': ver logs del servidor",
-                        "request_id": request_id,
-                    }),
+                    text=json.dumps(
+                        {
+                            "error": "internal_error",
+                            "detail": f"Error en tool '{name}': ver logs del servidor",
+                            "request_id": request_id,
+                        }
+                    ),
                 )
             ]
 
@@ -256,14 +299,32 @@ def create_server(
             duration_ms = (time.monotonic() - start_time) * 1000
             logger.info(
                 "request_id=%s tool=%s agent=%s duration=%.0fms",
-                request_id, name, agent_id or "anonymous", duration_ms,
+                request_id,
+                name,
+                agent_id or "anonymous",
+                duration_ms,
             )
 
     async def init() -> None:
         """Initialize database on server start."""
+        global _maintenance_scope
         await db.initialize()
-        # Start background tasks
-        asyncio.create_task(_maintenance_loop(db))
+        # Start background tasks inside a CancelScope
+        if _maintenance_scope is None:
+            _maintenance_scope = anyio.CancelScope()
+
+            async def _wrapper():
+                with _maintenance_scope:
+                    await _maintenance_loop(db, config)
+
+            # Fire-and-forget: schedule the wrapper on the event loop.
+            # In anyio's asyncio backend, get_running_loop().create_task
+            # is the standard fire-and-forget mechanism. We keep the import
+            # local to avoid module-level asyncio exposure.
+            import asyncio
+
+            asyncio.get_running_loop().create_task(_wrapper())
+
         logger.info(
             "Server initialized (db=%s, agent=%s)",
             db.db_path,

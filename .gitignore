@@ -10,6 +10,7 @@ wheels/
 .venv
 
 # Tooling caches
+.atl/
 .atl/*.cache.json
 .pytest_cache/
 
@@ -17,4 +18,7 @@ wheels/
 AGENT-BRIDGE-SPEC.md
 
 # Project resources
-Recursos/
+#Recursos/
+
+# Database files
+bridge.db*

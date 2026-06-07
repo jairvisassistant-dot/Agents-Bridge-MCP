@@ -17,25 +17,109 @@ CONFIG_PATHS = [
     Path.home() / ".agent-bridge.json",
 ]
 
+# ── Built-in skill template files ─────────────────────────────────
 
-# ── Built-in skills ───────────────────────────────────────────────
+SKILLS_DIR = Path(__file__).parent / "skills"
 
-BUILTIN_SKILLS: dict[str, Skill] = {
-    "architect": Skill(
-        name="architect",
-        version=1,
-        description="Skill del Arquitecto — planifica, revisa, aprueba",
-        allowed_tools=[
-            "plan.create", "plan.get", "plan.list", "plan.update",
-            "plan.export", "plan.import",
-            "task.create", "task.list", "task.get", "task.get_diff",
-            "review.start", "review.approve", "review.request_changes",
+
+def _load_builtin_skills() -> dict[str, Skill]:
+    """Load built-in skill templates from JSON files, falling back to hardcoded dict.
+
+    Each file under SKILLS_DIR named {role}.json is loaded.  If a file is missing
+    or invalid, the hardcoded fallback is used for that role.
+    """
+    hardcoded = _hardcoded_skills()
+
+    result: dict[str, Skill] = {}
+    for role, fallback in hardcoded.items():
+        path = SKILLS_DIR / f"{role}.json"
+        if path.exists():
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                result[role] = Skill(**data)
+                logger.debug("Loaded skill template from %s", path)
+                continue
+            except (json.JSONDecodeError, OSError, TypeError) as e:
+                logger.warning("Failed to load %s: %s — using hardcoded fallback", path, e)
+        result[role] = fallback
+    return result
+
+
+# Cache for get_builtin_skills — (skills_dict, max_mtime)
+_builtin_skills_cache: tuple[dict[str, Skill], float] | None = None
+
+
+def get_builtin_skills() -> dict[str, Skill]:
+    """Return built-in skills, reloading from disk when JSON files change.
+
+    The function caches the loaded skills and checks the mtime of each
+    skill JSON file on every call.  If any file has been modified since
+    the last load, it reloads from disk.  This enables hot-reload of
+    skill definitions while the server is running.
+    """
+    global _builtin_skills_cache
+
+    # Compute the most recent mtime among existing skill files
+    max_mtime = 0.0
+    for role in _hardcoded_skills():
+        path = SKILLS_DIR / f"{role}.json"
+        if path.exists():
+            try:
+                mtime = path.stat().st_mtime
+                if mtime > max_mtime:
+                    max_mtime = mtime
+            except OSError:
+                pass
+
+    # Reload if cache is missing or stale
+    if _builtin_skills_cache is None or max_mtime > _builtin_skills_cache[1]:
+        _builtin_skills_cache = (_load_builtin_skills(), max_mtime)
+
+    return _builtin_skills_cache[0]
+
+
+def _hardcoded_skills() -> dict[str, Skill]:
+    """Hardcoded fallback skill templates (used when JSON files are missing)."""
+    return {
+        "architect": Skill(
+            name="architect",
+            version=1,
+            description="Skill del Arquitecto — planifica, revisa, aprueba",
+            allowed_tools=[
+            "plan.create",
+            "plan.get",
+            "plan.list",
+            "plan.update",
+            "plan.export",
+            "plan.import",
+            "task.create",
+            "task.list",
+            "task.get",
+            "task.get_diff",
+            "review.start",
+            "review.approve",
+            "review.request_changes",
             "review.get_history",
-            "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
-            "chat.thread_get_pending", "chat.thread_resolve",
-            "agent.heartbeat", "agent.list", "agent.get", "agent.set_status",
+            "chat.send",
+            "chat.read",
+            "chat.thread_create",
+            "chat.thread_list",
+            "chat.thread_get_pending",
+            "chat.thread_resolve",
+            "chat.mark_read",
+            "agent.heartbeat",
+            "agent.list",
+            "agent.get",
+            "agent.set_status",
             "agent.whoami",
-            "skill.list", "skill.get",
+            "agent.ping",
+            "agent.pong",
+            "agent.idle",
+            "agent.shutdown_request",
+            "agent.shutdown_approve",
+            "skill.list",
+            "skill.get",
             "hello",
         ],
         instructions=[
@@ -56,12 +140,29 @@ BUILTIN_SKILLS: dict[str, Skill] = {
         version=1,
         description="Skill del Desarrollador — implementa, corrige, entrega",
         allowed_tools=[
-            "task.list", "task.get", "task.claim", "task.submit_work",
-            "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
-            "chat.thread_get_pending", "chat.thread_resolve",
-            "agent.heartbeat", "agent.list", "agent.get", "agent.set_status",
+            "task.list",
+            "task.get",
+            "task.claim",
+            "task.submit_work",
+            "chat.send",
+            "chat.read",
+            "chat.thread_create",
+            "chat.thread_list",
+            "chat.thread_get_pending",
+            "chat.thread_resolve",
+            "chat.mark_read",
+            "agent.heartbeat",
+            "agent.list",
+            "agent.get",
+            "agent.set_status",
             "agent.whoami",
-            "skill.list", "skill.get",
+            "agent.ping",
+            "agent.pong",
+            "agent.idle",
+            "agent.shutdown_request",
+            "agent.shutdown_approve",
+            "skill.list",
+            "skill.get",
             "hello",
         ],
         instructions=[
@@ -81,11 +182,19 @@ BUILTIN_SKILLS: dict[str, Skill] = {
         version=1,
         description="Skill por defecto — solo chat y presencia",
         allowed_tools=[
-            "chat.send", "chat.read", "chat.thread_create", "chat.thread_list",
-            "chat.thread_get_pending", "chat.thread_resolve",
-            "agent.heartbeat", "agent.list", "agent.get",
+            "chat.send",
+            "chat.read",
+            "chat.thread_create",
+            "chat.thread_list",
+            "chat.thread_get_pending",
+            "chat.thread_resolve",
+            "chat.mark_read",
+            "agent.heartbeat",
+            "agent.list",
+            "agent.get",
             "agent.whoami",
-            "skill.list", "skill.get",
+            "skill.list",
+            "skill.get",
             "hello",
         ],
         instructions=[
@@ -96,9 +205,6 @@ BUILTIN_SKILLS: dict[str, Skill] = {
         restrictions={},
     ),
 }
-
-
-# ── Config loader ─────────────────────────────────────────────────
 
 
 class BridgeConfig:
@@ -121,26 +227,49 @@ class BridgeConfig:
 
     def get_skill_for_role(self, role: str) -> Skill:
         """Get the effective skill for a role (custom → built-in → default)."""
+        builtin = get_builtin_skills()
         if role in self.custom_skills:
             return self.custom_skills[role]
-        if role in BUILTIN_SKILLS:
-            return BUILTIN_SKILLS[role]
-        return BUILTIN_SKILLS["default"]
+        if role in builtin:
+            return builtin[role]
+        return builtin["default"]
 
     def list_skills(self) -> list[dict]:
         """Return all available skills (built-in + custom)."""
-        all_skills = dict(BUILTIN_SKILLS)
+        all_skills = dict(get_builtin_skills())
         all_skills.update(self.custom_skills)
-        return [
-            {"name": s.name, "version": s.version, "description": s.description}
-            for s in all_skills.values()
-        ]
+        return [{"name": s.name, "version": s.version, "description": s.description} for s in all_skills.values()]
 
     @classmethod
     def load(cls) -> "BridgeConfig":
-        """Load bridge.json from the first path found, or return defaults."""
+        """Load bridge.json from the first path found, or return defaults.
+
+        Path resolution order:
+          1. AGENT_BRIDGE_CONFIG env var (highest precedence)
+          2. CONFIG_PATHS list (cwd/bridge.json, ~/.config/..., ~/.agent-bridge.json)
+        """
+        # 1. AGENT_BRIDGE_CONFIG env var
+        env_path = os.environ.get("AGENT_BRIDGE_CONFIG")
+        if env_path:
+            p = Path(env_path)
+            if p.exists():
+                logger.info("Loading config from AGENT_BRIDGE_CONFIG=%s", env_path)
+                try:
+                    with open(p) as f:
+                        return cls(json.load(f))
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Failed to load %s: %s", env_path, e)
+
+        # 2. Standard config paths
         for path in CONFIG_PATHS:
             if path.exists():
+                # Warn when resolving via cwd — fragile in production
+                if path.parent == Path.cwd():
+                    logger.warning(
+                        "Config resolved via cwd: %s — set AGENT_BRIDGE_CONFIG for "
+                        "a stable path independent of working directory",
+                        path,
+                    )
                 logger.info("Loading config from %s", path)
                 try:
                     with open(path) as f:

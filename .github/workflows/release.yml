@@ -1,0 +1,90 @@
+# ─────────────────────────────────────────────────────────────────────
+# release.yml — Build and release the Agent Bridge VSCode extension
+#               with an embedded Python backend binary.
+#
+# Triggered by:
+#   - Pushing a tag matching `v*` (e.g. `v0.2.0`)
+#   - Manual workflow_dispatch
+# ─────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          pip install -e .
+          pip install pyinstaller
+
+      - name: Bundle backend with PyInstaller
+        run: bash build/bundle-backend.sh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install VSC extension dependencies
+        working-directory: extensions/vscode
+        run: npm ci
+
+      - name: Package VSC extension (.vsix)
+        working-directory: extensions/vscode
+        run: npx vsce package -o "../../agent-bridge-${{ matrix.os }}-${{ github.ref_name }}.vsix"
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-bridge-vsc-${{ matrix.os }}
+          path: agent-bridge-*.vsix
+          compression-level: 0
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Agent Bridge ${{ github.ref_name }}
+          body: |
+            ## Agent Bridge ${{ github.ref_name }}
+
+            ### 📦 Downloads
+            - **Linux**: `agent-bridge-vsc-ubuntu-latest/*.vsix`
+            - **macOS**: `agent-bridge-vsc-macos-latest/*.vsix`
+            - **Windows**: `agent-bridge-vsc-windows-latest/*.vsix`
+
+            ### 🚀 Installation
+            1. Download the `.vsix` for your platform
+            2. In VSCode: Extensions ▸ ... ▸ Install from VSIX...
+            3. The backend binary is bundled — no separate Python installation required.
+          files: |
+            agent-bridge-vsc-ubuntu-latest/*.vsix
+            agent-bridge-vsc-macos-latest/*.vsix
+            agent-bridge-vsc-windows-latest/*.vsix

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # ── Plan ──────────────────────────────────────────────────────────
 
@@ -23,9 +23,7 @@ class Plan(BaseModel):
 
 # ── Task ──────────────────────────────────────────────────────────
 
-TaskStatus = Literal[
-    "pending", "in_progress", "review", "approved", "changes_requested"
-]
+TaskStatus = Literal["pending", "in_progress", "review", "approved", "changes_requested"]
 
 
 class Task(BaseModel):

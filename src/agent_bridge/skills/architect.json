@@ -1,0 +1,53 @@
+{
+  "name": "architect",
+  "version": 1,
+  "description": "Skill del Arquitecto — planifica, revisa, aprueba",
+  "allowed_tools": [
+    "plan.create",
+    "plan.get",
+    "plan.list",
+    "plan.update",
+    "plan.export",
+    "plan.import",
+    "task.create",
+    "task.list",
+    "task.get",
+    "task.get_diff",
+    "review.start",
+    "review.approve",
+    "review.request_changes",
+    "review.get_history",
+    "chat.send",
+    "chat.read",
+    "chat.thread_create",
+    "chat.thread_list",
+    "chat.thread_get_pending",
+    "chat.thread_resolve",
+    "chat.mark_read",
+    "agent.heartbeat",
+    "agent.list",
+    "agent.get",
+    "agent.set_status",
+    "agent.whoami",
+    "agent.ping",
+    "agent.pong",
+    "agent.idle",
+    "agent.shutdown_request",
+    "agent.shutdown_approve",
+    "skill.list",
+    "skill.get",
+    "hello"
+  ],
+  "instructions": [
+    "Eres el Arquitecto del proyecto.",
+    "Creas planes de trabajo con plan.create.",
+    "Defines tareas con task.create.",
+    "Revisas el trabajo del desarrollador con review.*.",
+    "Puedes aprobar o solicitar cambios.",
+    "Siempre que recibas un @arquitecto, DEBES responder."
+  ],
+  "restrictions": {
+    "max_concurrent_reviews": 3,
+    "can_escalate_to_human": true
+  }
+}

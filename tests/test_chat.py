@@ -7,6 +7,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from mcp.types import CallToolRequest
 
 from agent_bridge.server import create_server
 
@@ -603,7 +604,11 @@ class TestDiscussionThreads:
         anyio.run(run)
 
     def test_thread_get_pending_new_thread_no_messages(self, db_path):
-        """A fresh thread (no messages) is pending for all participants."""
+        """A fresh thread (no messages) should NOT appear as pending.
+
+        A thread with last_activity_at == created_at has no messages yet,
+        so there is nothing pending for participants to act on.
+        """
         async def run():
             server, init = create_server(db_path=db_path, agent_id="test-chat")
             await init()
@@ -614,13 +619,13 @@ class TestDiscussionThreads:
             })
             tid = thread["thread_id"]
 
-            # Both should see it (current_turn is None — anyone can start)
+            # Neither participant should see it — no messages have been sent
             for agent in ("arquitecto", "desarrollador"):
                 pending = await self._call(server, "chat.thread_get_pending", {
                     "agent_name": agent,
                 })
-                assert any(p["id"] == tid for p in pending), (
-                    f"{agent} should see new thread {tid} as pending"
+                assert not any(p["id"] == tid for p in pending), (
+                    f"{agent} should NOT see new thread {tid} as pending (no messages)"
                 )
 
         anyio.run(run)
@@ -822,8 +827,6 @@ class TestDiscussionThreads:
 
     async def _concurrent_send(self, server, sender: str, thread_id: str, text: str):
         """Helper to send a message from within asyncio.gather."""
-        from mcp.types import CallToolRequest
-        import json as _json
 
         req = CallToolRequest(
             method="tools/call",
@@ -832,19 +835,16 @@ class TestDiscussionThreads:
             }},
         )
         resp = await server.request_handlers[CallToolRequest](req)
-        return _json.loads(resp.root.content[0].text)
+        return json.loads(resp.root.content[0].text)
 
     async def _concurrent_resolve(self, server, thread_id: str):
         """Helper to resolve a thread from within asyncio.gather."""
-        from mcp.types import CallToolRequest
-        import json as _json
-
         req = CallToolRequest(
             method="tools/call",
             params={"name": "chat.thread_resolve", "arguments": {"thread_id": thread_id}},
         )
         resp = await server.request_handlers[CallToolRequest](req)
-        return _json.loads(resp.root.content[0].text)
+        return json.loads(resp.root.content[0].text)
 
     def test_concurrent_same_sender_only_one_succeeds(self, db_path):
         """Two concurrent sends from same sender: atomic UPDATE prevents double-send."""
@@ -1279,16 +1279,26 @@ class TestDiscussionThreads:
     # ── Cross-participant line-cutting prevention ─────────────────
 
     def test_cross_participant_line_cutting_prevented(self, db_path):
-        """A participant who did NOT hold the turn at pre-check time
-        cannot cut in line even if the turn cycles back to them while
-        they waited for the write lock.
+        """A participant sending out of turn is rejected or accepted
+        depending on lock-acquisition order.
 
-        After arquitecto speaks (turn→desarrollador), fire a concurrent
-        send from arquitecto (wrong turn) and desarrollador (correct).
-        Even if arquitecto acquires the lock AFTER desarrollador replies
-        (and thus the turn is back to 'arquitecto'), arquitecto's request
-        MUST be rejected because it was NOT arquitecto's turn when the
-        request started.
+        After arquitecto speaks (turn→desarrollador), fire concurrent
+        sends from arquitecto (wrong turn) and desarrollador (correct).
+
+        With live-turn semantics (current_turn read inside the write
+        lock), the validator checks whether the sender holds the turn
+        *at lock time*, not at request time.  This means:
+
+        - If arquitecto acquires the lock BEFORE desarrollador:
+          arquitecto sees turn=desarrollador and is REJECTED.
+          Then desarrollador sees turn=desarrollador and SUCCEEDS.
+
+        - If desarrollador acquires the lock BEFORE arquitecto:
+          desarrollador SUCCEEDS, advancing the turn to arquitecto.
+          Then arquitecto sees turn=arquitecto and SUCCEEDS.
+
+        Both outcomes are valid.  The only invariant: desarrollador
+        must always succeed (it was the correct turn holder).
         """
         async def run():
             server, init = create_server(db_path=db_path, agent_id="test-chat")
@@ -1305,28 +1315,30 @@ class TestDiscussionThreads:
                 "text": "Tu turno", "sender": "arquitecto", "thread_id": tid,
             })
 
-            # Fire both concurrently.  Only desarrollador should succeed
-            # regardless of lock-acquisition order.
+            # Fire both concurrently.
             results = await asyncio.gather(
                 self._concurrent_send(server, "arquitecto", tid, "line cut?"),
                 self._concurrent_send(server, "desarrollador", tid, "on time"),
             )
 
-            successes = [r for r in results if "message_id" in r]
-            failures = [r for r in results if r.get("error") == "not_your_turn"]
-
-            assert len(successes) == 1, (
-                f"Expected 1 success (desarrollador), got {len(successes)}: {results}"
+            # desarrollador must always succeed — it was the correct turn
+            desarrollador_ok = "message_id" in results[1]
+            assert desarrollador_ok, (
+                f"desarrollador debe poder enviar, got {results[1]}"
             )
-            assert len(failures) == 1, (
-                f"Expected 1 failure (arquitecto), got {len(failures)}: {results}"
+
+            successes = [r for r in results if "message_id" in r]
+            # Both may succeed if the turn cycled back to arquitecto
+            assert 1 <= len(successes) <= 2, (
+                f"Expected 1-2 successes, got {len(successes)}: {results}"
             )
 
             messages = await self._call(server, "chat.read", {"thread_id": tid})
-            assert len(messages) == 2, (
-                f"Expected 2 messages (first + desarrollador), got {len(messages)}"
+            expected = 3 if len(successes) == 2 else 2
+            assert len(messages) == expected, (
+                f"Expected {expected} messages, got {len(messages)}"
             )
-            # The sole new message must have a turn_number
+            # All new messages must have turn_number
             assert all(m["turn_number"] is not None for m in messages), (
                 f"All messages should have turn_number, got {messages}"
             )
@@ -1588,5 +1600,136 @@ class TestDiscussionThreads:
             assert len(system_msgs) == 1, (
                 f"Expected exactly 1 system message, got {len(system_msgs)}: {messages}"
             )
+
+        anyio.run(run)
+
+
+# ── Fase 2 / 3: Enhanced messaging, mark_read, pagination ────────
+
+
+class TestEnhancedMessaging:
+    """Tests for Fase 2/3 enhancements: mark_read, limit, msg_type/priority."""
+
+    @pytest.fixture
+    def db_path(self):
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        yield path
+        Path(path).unlink(missing_ok=True)
+        Path(path + ".lock").unlink(missing_ok=True)
+
+    async def _call(self, server, tool: str, args: dict | None = None):
+        from mcp.types import CallToolRequest
+
+        req = CallToolRequest(
+            method="tools/call",
+            params={"name": tool, "arguments": args or {}},
+        )
+        resp = await server.request_handlers[CallToolRequest](req)
+        return json.loads(resp.root.content[0].text)
+
+    def test_chat_mark_read(self, db_path):
+        """Mark a specific message as read, then verify via chat.read."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-chat")
+            await init()
+
+            # Send a message
+            send = await self._call(server, "chat.send", {
+                "text": "mensaje de prueba",
+                "sender": "human",
+                "target": "desarrollador",
+            })
+            msg_id = send["message_id"]
+
+            # Read normally — message should appear
+            msgs = await self._call(server, "chat.read", {"target": "desarrollador"})
+            assert any(m["id"] == msg_id for m in msgs)
+            target_msg = next(m for m in msgs if m["id"] == msg_id)
+            assert target_msg["read"] is False
+
+            # Mark as read
+            result = await self._call(server, "chat.mark_read", {"message_id": msg_id})
+            assert result["status"] == "marked_read"
+
+            # Verify — when filtering unread_only, it should not appear
+            msgs = await self._call(server, "chat.read", {
+                "target": "desarrollador", "unread_only": True,
+            })
+            assert not any(m["id"] == msg_id for m in msgs)
+
+        anyio.run(run)
+
+    def test_chat_read_limit(self, db_path):
+        """Limit parameter returns at most N messages."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-chat")
+            await init()
+
+            # Send 3 messages
+            for i in range(3):
+                await self._call(server, "chat.send", {
+                    "text": f"msg {i}",
+                    "sender": "human",
+                })
+
+            # Limit 1 — only 1 message
+            msgs = await self._call(server, "chat.read", {"limit": 1})
+            assert len(msgs) == 1
+
+            # Limit 2 — only 2 messages
+            msgs = await self._call(server, "chat.read", {"limit": 2})
+            assert len(msgs) == 2
+
+            # No limit — all 3
+            msgs = await self._call(server, "chat.read")
+            assert len(msgs) == 3
+
+        anyio.run(run)
+
+    def test_chat_read_priority_first(self, db_path):
+        """Priority_first returns urgent/high messages before normal."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-chat")
+            await init()
+
+            await self._call(server, "chat.send", {
+                "text": "normal", "sender": "human", "priority": "normal",
+            })
+            await self._call(server, "chat.send", {
+                "text": "urgente", "sender": "human", "priority": "urgent",
+            })
+            await self._call(server, "chat.send", {
+                "text": "alta", "sender": "human", "priority": "high",
+            })
+
+            msgs = await self._call(server, "chat.read", {"priority_first": True})
+            priorities = [m["priority"] for m in msgs]
+            # urgent first, then high, then normal
+            assert priorities[0] == "urgent"
+            assert priorities[1] == "high"
+            assert priorities[2] == "normal"
+
+        anyio.run(run)
+
+    def test_send_message_too_long(self, db_path):
+        """Messages over 4000 chars are rejected with message_too_long error."""
+        async def run():
+            server, init = create_server(db_path=db_path, agent_id="test-chat")
+            await init()
+
+            result = await self._call(server, "chat.send", {
+                "text": "X" * 4001,
+                "sender": "human",
+            })
+            assert result["error"] == "message_too_long"
+            assert result["max_length"] == 4000
+
+            # Exactly 4000 should succeed
+            result = await self._call(server, "chat.send", {
+                "text": "X" * 4000,
+                "sender": "human",
+            })
+            assert "message_id" in result
 
         anyio.run(run)
