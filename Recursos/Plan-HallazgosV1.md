@@ -22,7 +22,7 @@
 | **7** | Features Faltantes | ⚠️ Parcial (7.1, 7.5 hechos) |
 | **8** | Distribución: Extensión VSCode | ❌ Pendiente |
 
-**Commit:** `TBD` (fases 0–6 en un solo commit masivo)
+**Commit:** [`86f6625`](https://github.com/jairvisassistant-dot/Agents-Bridge-MCP/commit/86f6625) (fases 0–6 en un solo commit masivo)
 
 ---
 
