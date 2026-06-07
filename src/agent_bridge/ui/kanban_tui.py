@@ -9,6 +9,8 @@ Layout:
   │  TaskList            │  TaskDetail                      │
   │  (navegable con ↑↓)  │  (detalle contextual)            │
   ├──────────────────────┴───────────────────────────────────┤
+  │  💬 Chat persistente — mensajes, agentes, @menciones    │
+  ├──────────────────────────────────────────────────────────┤
   │  [N] Nueva  [M] Mover  [D] Detalle  [K] Chat  [Q] Salir │
   └──────────────────────────────────────────────────────────┘
 """
@@ -23,7 +25,7 @@ from textual.binding import Binding
 from textual.widgets import Footer, Static
 
 from agent_bridge.state.database import Database
-from agent_bridge.ui.chat_overlay import ChatOverlay
+from agent_bridge.ui.chat_panel import ChatPanel
 from agent_bridge.ui.create_task_modal import CreateTaskModal
 from agent_bridge.ui.db_watcher import DBWatcher
 from agent_bridge.ui.kanban_board import KanbanBoard, TaskList
@@ -36,9 +38,13 @@ logger = logging.getLogger(__name__)
 class KanbanTUI(App):
     """Agent Bridge Kanban — hub central del supervisor.
 
-    Shows tasks in a vertical task list with a detail panel.
-    Supports keyboard navigation, new/move actions, and chat overlay.
-    Auto-refreshes via DBWatcher polling.
+    Shows tasks in a vertical task list with a detail panel,
+    and a persistent chat panel at the bottom for communicating
+    with agents. The chat switches to contextual mode when a
+    task is selected (filters messages for that task).
+
+    Supports keyboard navigation, CRUD actions, and auto-refresh
+    via DBWatcher polling.
     """
 
     CSS = """
@@ -108,7 +114,7 @@ class KanbanTUI(App):
         Binding("n", "new_task", "Nueva"),
         Binding("m", "move_task", "Mover"),
         Binding("d", "show_detail", "Detalle"),
-        Binding("k", "toggle_chat", "Chat"),
+        Binding("k", "focus_chat", "Chat"),
         Binding("q", "quit", "Salir"),
         Binding("r", "refresh", "Refrescar", show=False),
     ]
@@ -118,12 +124,12 @@ class KanbanTUI(App):
         self._db = Database(db_path=db_path, dry_run=dry_run)
         self._bridge = TuiBridge(self._db)
         self._watcher = DBWatcher(self._db, interval=1.5, on_change=self._on_db_change)
-        self._chat_open = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="header-bar")
         yield Static(id="summary-bar")
         yield KanbanBoard()
+        yield ChatPanel(self._bridge)
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -261,27 +267,17 @@ class KanbanTUI(App):
         """Placeholder: show full task detail."""
         self.notify("📄 Detalle completo — próximo release", timeout=2)
 
-    async def action_toggle_chat(self) -> None:
-        """Open chat overlay contextual to the selected task."""
-        if self._chat_open:
-            return
-        self._chat_open = True
+    async def action_focus_chat(self) -> None:
+        """Focus the chat input so the human can type immediately.
 
-        board = self.query_one(KanbanBoard)
-        task = board.selected_task
-
-        overlay = ChatOverlay(self._bridge, task_context=task)
-
-        self.push_screen(overlay, callback=lambda _: self._on_chat_closed())  # type: ignore[arg-type]
-
-    def _on_chat_closed(self) -> None:
-        """Handle chat overlay dismissal."""
-        self._chat_open = False
-        self.call_later(self._after_chat_closed)
-
-    async def _after_chat_closed(self) -> None:
-        """Refresh the kanban board after the chat closes."""
-        await self._load_tasks()
+        The chat panel is always visible at the bottom. Pressing K
+        moves focus to the input field for quick message entry.
+        """
+        try:
+            panel = self.query_one(ChatPanel)
+            panel.focus_input()
+        except Exception:
+            pass
 
     async def action_refresh(self) -> None:
         """Manually refresh the kanban board."""

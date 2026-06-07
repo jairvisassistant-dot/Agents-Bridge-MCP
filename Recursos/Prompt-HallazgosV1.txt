@@ -4,10 +4,36 @@ Antes de empezar debes tener muy clara el objetivo y el alcance de todo el codig
 Despues de este resultado quiero que tu mismo investigues determines si hay mejores formas de realizar alguna funcionalidad que nos permita no solo mejorar el flujo del programna sino su rendiemiento e interactividad
 
 
-Ahora quiero que analices tus hallazgos y respondas las siguientes preguntas:
+Ahora quiero que analices tus hallazgos (/home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/HallazgosV1.md - /home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/informe-hallazgos-v2.md) y respondas las siguientes preguntas:
 - Analiza el codigo de cada funcionalidad y determina si al ejecutar su flujo este está completo y cumple la función para el que fue creado?
 - Determina cuantas funciones estan incompletas y si el resultado es compartido como entrada para otra funcionalidad si estos flujos estan funcionando bien
 Para finalizar documenta sobre el mismo archivo (/home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/Plan-HallazgosV1.md) en la parte final los hallazgos encontrados
 
 
-Antes de empezar con la ejecución de la fase 3 debes tener muy clara el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades que vas a modificar, esto con el objetivo de no afectar otras funcionalidades que estan bien, cada cambio o modificación debe de ser quirurgico
+Antes de empezar con la ejecución de la fase 1 debes tener muy clara el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades que vas a modificar, esto con el objetivo de no afectar otras funcionalidades que estan bien, cada cambio o modificación debe de ser quirurgico
+
+
+Eres un experto desarrollador de software.
+Toma como referencia los hallazgos /home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/HallazgosV1.md) y el plan de trabajo de /home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/Plan-HallazgosV1.md) y tu tarea es revisar todo el codigo del proyecto para determinar si el flujo en la ejecución de las tareas es correcto o si por el contrario todavia tiene errores y problemas, analiza cada funcionalidad por separado y luego el flujo engranado para ver donde se rompe. Al finalizar genera un informe de tus hallazgos.
+Antes de empezar debes tener muy claro el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades para que sepas si el resultado es correcto o no, determina si los cambios realizados fueron correctos o no o si han agregado regresiones al codigo, siempre debe ser un codigo seguro sin vulnerabilidades ni bugs
+
+
+Resumen rápido para desarrollo local                                                                                                                               src/agent_bridge/tools/review +28 -16   
+                                                                                                                                                                        src/agent_bridge/tools/tasks. +42 -23   
+     # Terminal 1 — servidor standalone (para probar tools)                                                                                                             tests/test_database_refactor.p +49 -6   
+     cd /home/jilz/Escritorio/Agents-Bridge-MCP                                                                                                                         tests/test_edge_cases.py         +210   
+     source .venv/bin/activate                                                                                                                                          tests/test_state_machine.py       +18   
+     pip install -e ".[test]"                                                                                                                                                                                   
+     python -m agent_bridge start --headless --port 8765 --db-path /tmp/test.db                                                                                                                                 
+                                                                                                                                                                                                                
+     # Terminal 2 — probar tools via MCP                                                                                                                                                                        
+     curl -X POST http://localhost:8765/mcp \                                                                                                                                                                   
+       -H "Content-Type: application/json" \                                                                                                                                                                    
+       -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'                                                                                                                                          
+                                                                                                                                                                                                                
+     Para la extensión VSCode completa, lo más simple es:                                                                                                                                                       
+                                                                                                                                                                                                                
+     # Con uv tool                                                                                                                                                                                              
+     uv tool install /home/jilz/Escritorio/Agents-Bridge-MCP                                                                                                                                                    
+     cd extensions/vscode && npm install && npm run compile                                                                                                                                                     
+     # Abrí VSCode, F5, y probás la extensión en el host de desarrollo     

@@ -769,15 +769,17 @@ class TestKanbanTUIHeadless:
             ("task-1", "plan-1", task_title, "pending", assignee),
         )
 
-    async def _find_overlay(self, app) -> ChatOverlay | None:
-        """Find ChatOverlay in the app's screen stack."""
-        screen = app.screen
-        if isinstance(screen, ChatOverlay):
-            return screen
-        return None
+    async def _find_chat_panel(self, app):
+        """Find ChatPanel in the app's DOM."""
+        from agent_bridge.ui.chat_panel import ChatPanel
 
-    def test_chat_general_when_no_task(self, db_path):
-        """K without a selected task opens general chat."""
+        try:
+            return app.query_one(ChatPanel)
+        except Exception:
+            return None
+
+    def test_chat_panel_always_visible(self, db_path):
+        """ChatPanel is always visible — no overlay needed."""
 
         async def run():
             await self._setup_db(db_path)
@@ -787,24 +789,26 @@ class TestKanbanTUIHeadless:
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause(0.5)
 
-                # Press K without focusing the task list (no selection)
+                # ChatPanel should be in the DOM from the start
+                panel = await self._find_chat_panel(app)
+                assert panel is not None, "ChatPanel should be mounted"
+
+                # Status bar should show Chat general (no task selected)
+                status = panel.query_one("#chat-status-bar", Static)
+                status_text = str(status.content)
+                assert "Chat general" in status_text
+
+                # K should focus the input
                 await pilot.press("k")
                 await pilot.pause(0.3)
-
-                overlay = await self._find_overlay(app)
-                assert overlay is not None
-
-                header = overlay.query_one("#chat-header", Static)
-                header_text = str(header.content)
-                assert "Chat general" in header_text
-
-                await pilot.press("escape")
-                await pilot.pause(0.3)
+                focused = app.focused
+                assert focused is not None
+                assert focused.id == "chat-input"
 
         anyio.run(run)
 
-    def test_chat_double_k_no_op(self, db_path):
-        """Pressing K while chat is open does nothing (no double overlay)."""
+    def test_chat_input_focus_on_k(self, db_path):
+        """Pressing K focuses the chat input (no overlay)."""
 
         async def run():
             await self._setup_db(db_path)
@@ -814,49 +818,19 @@ class TestKanbanTUIHeadless:
             async with app.run_test(size=(120, 40)) as pilot:
                 await pilot.pause(0.5)
 
-                # Open chat
+                # K focuses the chat input
                 await pilot.press("k")
                 await pilot.pause(0.3)
+                assert app.focused is not None
+                assert app.focused.id == "chat-input"
 
-                # Try to open again — should still be on the same overlay
+                # Pressing K again keeps focus on the input (it's already focused)
                 await pilot.press("k")
                 await pilot.pause(0.3)
+                assert app.focused.id == "chat-input"
 
-                overlay = await self._find_overlay(app)
-                assert overlay is not None, "Chat should still be open after second K"
-
-                await pilot.press("escape")
-                await pilot.pause(0.3)
-
-        anyio.run(run)
-
-    def test_chat_escape_closes_overlay(self, db_path):
-        """Escape closes the chat overlay and returns to main view."""
-
-        async def run():
-            await self._setup_db(db_path)
-            from agent_bridge.ui.kanban_tui import KanbanTUI
-
-            app = KanbanTUI(db_path=db_path, dry_run=False)
-            async with app.run_test(size=(120, 40)) as pilot:
-                await pilot.pause(0.5)
-
-                # Open chat
-                await pilot.press("k")
-                await pilot.pause(0.3)
-
-                overlay = await self._find_overlay(app)
-                assert overlay is not None, "Chat should be open"
-
-                # Close with Escape
-                await pilot.press("escape")
-                await pilot.pause(0.3)
-
-                overlay_after = await self._find_overlay(app)
-                assert overlay_after is None, "Chat should be closed after Escape"
-
-                # _chat_open should be False
-                assert app._chat_open is False
+                # No modal screens should be on the stack
+                assert len(app.screen_stack) == 1, "No overlays should be open"
 
         anyio.run(run)
 

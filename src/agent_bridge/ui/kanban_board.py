@@ -265,9 +265,19 @@ class KanbanBoard(Static):
             return None
 
     def _on_task_selected(self, task: dict[str, Any] | None) -> None:
-        """Update the detail panel when a task is selected."""
+        """Update the detail panel and chat context when a task is selected."""
         try:
             detail = self.query_one(TaskDetail)
             detail.task = task
         except Exception:
             pass  # Not mounted yet
+
+        # Update chat context — when a task is selected the chat shows
+        # messages for that task; when deselecting it goes back to general.
+        try:
+            from agent_bridge.ui.chat_panel import ChatPanel
+
+            chat = self.app.query_one(ChatPanel)
+            chat.task_context = task
+        except Exception:
+            pass  # ChatPanel not mounted yet (e.g. tests without chat)
