@@ -64,6 +64,9 @@ export type ConnectionState =
   | "reconnecting"
   | "error";
 
+/** Health status of the Python process. */
+export type HealthStatus = "healthy" | "unhealthy" | "unknown";
+
 // ── MCP protocol types ──────────────────────────────────────────
 
 export interface MCPTool {
@@ -75,6 +78,21 @@ export interface MCPTool {
 export interface MCPCallResult {
   content: Array<{ type: string; text: string }>;
   isError?: boolean;
+}
+
+// ── Dashboard data ──────────────────────────────────────────────
+
+export interface DashboardData {
+  /** List of registered agents. */
+  agents: AgentInfo[];
+  /** Connection state of the bridge. */
+  connectionState: ConnectionState;
+  /** Health status of the sidecar process. */
+  health: HealthStatus;
+  /** Number of active terminal sessions. */
+  terminalCount: number;
+  /** Sidecar process PID (shown for debugging). */
+  pid?: number;
 }
 
 // ── Events ───────────────────────────────────────────────────────

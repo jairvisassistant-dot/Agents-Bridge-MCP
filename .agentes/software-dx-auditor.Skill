@@ -1,0 +1,95 @@
+---
+name: software-dx-auditor
+description: "Trigger: auditar DX, auditar developer experience, revisar experiencia de uso, evaluar CLI, revisar setup, evaluar TUI. Auditoría de Developer Experience: CLI, TUI, documentación, errores, onboarding, README."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "2.0"
+---
+
+## When to Use
+
+- Solicitud de "auditar experiencia de desarrollo" o "revisar DX"
+- Evaluación de CLI ergonomics y mensajes de error
+- Revisión de documentación (README, skills, help)
+- Evaluación de onboarding y setup experience
+- Análisis de claridad de errores y feedback al usuario
+
+## Exclusiones (NO auditar)
+
+```
+.venv/ → excluir | __pycache__/ → excluir | *.pyc → excluir
+.git/ → excluir | *.db → excluir
+```
+
+**Áreas delegadas a otras skills (NO duplicar):**
+- Seguridad, race conditions, bugs → code-auditor
+- Arquitectura, permisos, state machine → architecture-auditor
+- Testing, cobertura → code-auditor
+
+## Input Contract
+
+| Contexto | Fuente |
+|---|---|
+| Código fuente | `src/agent_bridge/` completo |
+| CLI | `src/agent_bridge/main.py` |
+| TUI | `src/agent_bridge/ui/chat_tui.py` |
+| Documentación | `README.md` |
+| Skills | `.agentes/*.Skill` |
+| Config | `bridge.json` |
+| Hallazgos de FASE 1 y 2 | `audits/audit_code_*.json`, `audits/audit_architecture_*.json` |
+| Modo ejecución | `pipeline` (vía orquestador) o `standalone` |
+
+## Output Contract
+
+`audits/audit_dx_YYYYMMDD_HHMM.md` (+ .json)
+
+## Methodology
+
+### PASO 1 — CLI Ergonomics
+- ¿Los comandos tienen nombres intuitivos (`start`, `init`, `reset`, etc.)?
+- ¿Los flags tienen `--help` descriptivo?
+- ¿Los mensajes de error del CLI son claros y en español?
+- ¿Hay confirmación antes de acciones destructivas (`reset`)?
+- ¿El `--dry-run` es descubrible y útil?
+
+### PASO 2 — Mensajes de Error
+- Para cada tool en `tools/`:
+  - ¿Los errores son específicos o genéricos?
+  - ¿Incluyen `request_id` para trazabilidad?
+  - ¿Los errores de permisos indican qué tools SÍ puede usar el agente?
+  - ¿Los errores de concurrencia son entendibles por un humano?
+
+### PASO 3 — TUI Experience
+- ¿La TUI muestra claramente el estado de los agentes?
+- ¿Los mensajes nuevos son fáciles de ver?
+- ¿Se puede diferenciar quién envió cada mensaje?
+- ¿La reconexión automática es visible?
+- ¿Hay feedback cuando un agente se conecta/desconecta?
+
+### PASO 4 — Documentación (README)
+- ¿Cubre instalación global y local?
+- ¿Explica el protocolo MCP a alto nivel?
+- ¿Las skills están documentadas?
+- ¿El flujo de las 3 terminales está claro?
+- ¿Hay ejemplos de uso real?
+
+### PASO 5 — Skills de Agente
+- ¿`dev.Skill` y `architect.Skill` son claros y accionables?
+- ¿Incluyen pasos de heartbeat, git sync, reporte en TUI?
+- ¿Los triggers (`@dev.Skill`, `@architect.Skill`) son consistentes?
+
+### PASO 6 — Onboarding y Setup
+- ¿`agent-bridge init` configura todo lo necesario?
+- ¿Los mensajes de init guían al usuario paso a paso?
+- ¿Hay validación post-instalación?
+- ¿Los errores de setup son informativos?
+
+## Red Lines
+
+```
+NO duplicar hallazgos de bugs, seguridad o arquitectura
+NO sugerir cambios de UI sin considerar que es una TUI, no una web
+NO profundizar en código para diagnosticar — solo evaluar experiencia
+NO ignorar errores confusos o mensajes que asumen conocimiento técnico profundo
+```

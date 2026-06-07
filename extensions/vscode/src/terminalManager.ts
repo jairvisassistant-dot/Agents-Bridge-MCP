@@ -6,9 +6,14 @@ import * as vscode from "vscode";
  * Each agent gets its own terminal with the `AGENT_BRIDGE_ID` environment
  * variable set, and an optional skill command is sent on creation to
  * bootstrap the agent's interactive session.
+ *
+ * Also handles cross-terminal notification delivery (Feature 2): when
+ * terminal messages arrive from the MCP server, they are written into the
+ * target agent's terminal via `sendText()`.
  */
 export class TerminalManager {
   private terminals: Map<string, vscode.Terminal> = new Map();
+  private agentRoles: Map<string, string> = new Map(); // agentId → role
   private closeDisposables: Map<string, vscode.Disposable> = new Map();
   private onStateChange: () => void;
 
@@ -65,6 +70,7 @@ export class TerminalManager {
     }
 
     this.terminals.set(agentId, terminal);
+    this.agentRoles.set(agentId, role);
 
     // ── Listen for unexpected terminal close ──
     const closeDisposable = vscode.window.onDidCloseTerminal(
@@ -94,6 +100,13 @@ export class TerminalManager {
   }
 
   /**
+   * Update or set the role for a connected agent (called during polling).
+   */
+  setAgentRole(agentId: string, role: string): void {
+    this.agentRoles.set(agentId, role);
+  }
+
+  /**
    * Disconnect a single agent by disposing its terminal.
    */
   disconnectAgent(agentId: string): void {
@@ -114,6 +127,7 @@ export class TerminalManager {
       terminal.dispose();
     }
     this.terminals.clear();
+    this.agentRoles.clear();
     this.closeDisposables.clear();
     this.onStateChange();
   }
@@ -133,6 +147,22 @@ export class TerminalManager {
   }
 
   /**
+   * Find all connected agent IDs that have the given role.
+   *
+   * @param role  Role to match (e.g. "desarrollador", "arquitecto", "humano").
+   * @returns Array of matching agent IDs (empty if none found).
+   */
+  getAgentIdsByRole(role: string): string[] {
+    const matches: string[] = [];
+    for (const [agentId, agentRole] of this.agentRoles) {
+      if (agentRole === role && this.terminals.has(agentId)) {
+        matches.push(agentId);
+      }
+    }
+    return matches;
+  }
+
+  /**
    * Send a text command to the specified agent's terminal.
    * No-op if the agent is not connected.
    */
@@ -141,6 +171,27 @@ export class TerminalManager {
     if (terminal) {
       terminal.sendText(command);
     }
+  }
+
+  /**
+   * Write a notification message into an agent's terminal.
+   *
+   * The message is visually distinct (prefixed with "──" and the sender
+   * label) so the agent can differentiate it from their own output.
+   *
+   * @param agentId  Target agent identifier.
+   * @param sender   Who sent the message (shown as label).
+   * @param text     The message content.
+   */
+  notifyTerminal(agentId: string, sender: string, text: string): void {
+    const terminal = this.terminals.get(agentId);
+    if (!terminal) return;
+
+    // Use echo with a clear visual separator so it's noticeable
+    const escaped = text.replace(/`/g, "\\`").replace(/\$/g, "\\$");
+    const line = `── [${sender}] ── ${escaped}`;
+    terminal.sendText(`echo "📩 ${line}"`);
+    terminal.show();
   }
 
   /**
@@ -169,6 +220,7 @@ export class TerminalManager {
    */
   private cleanupAgent(agentId: string): void {
     this.terminals.delete(agentId);
+    this.agentRoles.delete(agentId);
     this.closeDisposables.get(agentId)?.dispose();
     this.closeDisposables.delete(agentId);
     this.onStateChange();

@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "type": "architecture",
+    "date": "2026-05-14 14:52",
+    "baseline": "7179d78b1f66d46b88520a8aff80491c82c2e21d"
+  },
+  "stats": {
+    "total": 17,
+    "crit": 2,
+    "high": 4,
+    "med": 6,
+    "low": 3,
+    "info": 2
+  },
+  "findings": [
+    {
+      "id": "ARCH-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/state/state_machine.py",
+      "line": 1,
+      "title": "State machine is documentation-only, no enforcement on DB writes",
+      "description": "validate_task_transition y validate_plan_transition se llaman SOLO después del write (rowcount=0) para generar mensajes de error. El guardia real de concurrencia son WHERE clauses hardcodeados en cada handler. Cambiar transiciones en state_machine.py NO afecta el comportamiento del sistema.",
+      "impact": "La máquina de estados no protege el modelo de datos. Cambios en el mapa de transiciones requieren modificar cada tool handler individualmente. El sistema no puede prevenir transiciones inválidas a nivel arquitectónico.",
+      "recommendation": "Centralizar validación de transición: crear db.transition_task(id, from_status, to_status) que valide contra el mapa y ejecute en una sola operación atómica. Remover WHERE clauses hardcodeados de cada handler."
+    },
+    {
+      "id": "ARCH-02",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 196,
+      "title": "Per-call SQLite connection pattern prevents transactional atomicity",
+      "description": "Cada execute/execute_write/execute_one abre conexión nueva, ejecuta SQL, commitea y cierra. with_transaction es el único path que retiene conexión para múltiples queries. Esto hace que operaciones que deberían ser atómicas (review approve: UPDATE task + UPDATE review) corran en conexiones independientes.",
+      "impact": "Imposibilidad arquitectónica de tener transacciones reales entre writes relacionados. Cada conexión nueva paga overhead de PRAGMAs. WAL mode se beneficia de conexiones persistentes, no de open-close-per-call.",
+      "recommendation": "Mantener una conexión SQLite singleton con WAL para todo el lifecycle del server. Usar anyio.Lock para serializar writes. Establecer PRAGMAs solo al inicio."
+    },
+    {
+      "id": "ARCH-03",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 150,
+      "title": "No BEGIN IMMEDIATE on individual write operations",
+      "description": "_execute_write ejecuta UPDATE/INSERT sin BEGIN IMMEDIATE explícito. SQLite usa BEGIN DEFERRED por defecto, que solo adquiere write lock al ejecutar el statement de escritura. Con WAL mode y múltiples threads, dos writes concurrentes pueden progresar hasta que SQLite serializa internamente. busy_timeout=5000 enmascara el problema.",
+      "impact": "Bajo alta contención, writes individuales pueden fallar con SQLITE_BUSY tras 5s de timeout. with_transaction sí usa BEGIN IMMEDIATE, creando asimetría en el modelo de concurrencia.",
+      "recommendation": "Usar BEGIN IMMEDIATE en execute_write. Si se migra a conexión singleton (ARCH-02), es obligatorio para prevenir deadlocks."
+    },
+    {
+      "id": "ARCH-04",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/server.py",
+      "line": 44,
+      "title": "Permission model depends on mutable SQLite role state",
+      "description": "Resolución de roles: bridge.json (estático) → SQLite agents.role (mutable vía heartbeat) → default. agent.heartbeat acepta role_hint que sobrescribe el rol de DB. Un agente puede cambiar su propio rol en runtime cambiando qué tools tiene permitidas.",
+      "impact": "Posible privilege escalation si un agente heartbeatea con role='architect'. No hay inmutabilidad del rol después del registro inicial.",
+      "recommendation": "Congelar rol después del primer heartbeat. Solo permitir cambios vía bridge.json o una tool admin dedicada."
+    },
+    {
+      "id": "ARCH-05",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/server.py",
+      "line": 232,
+      "title": "Sequential tool dispatch without isolation",
+      "description": "handle_call_tool itera handlers en orden fijo (plan→task→review→chat→agents→skills). Primer not-None gana. Si un handler crashea (excepción no capturada), los siguientes no se ejecutan para esa llamada.",
+      "impact": "Falla en cascada: un error en handler de plan deja sin respuesta a cualquier tool que no coincida con handlers anteriores. Dificulta extensión con tools custom.",
+      "recommendation": "Usar dict[str, Callable] para dispatch. Extraer dominio del tool name (ej: 'plan' de 'plan.update') y rutear directamente."
+    },
+    {
+      "id": "ARCH-06",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/main.py",
+      "line": 103,
+      "title": "init_db() executed per SSE connection without distributed lock",
+      "description": "Cada conexión SSE llama a db.initialize() que ejecuta SCHEMA_SQL completo y verifica schema_version. Dos conexiones simultáneas en DB fresh ven schema_version=0 y AMBAS ejecutan migraciones ALTER TABLE que no son idempotentes.",
+      "impact": "Race condition en startup con múltiples conexiones SSE. La segunda falla con 'duplicate column' si hay migraciones ALTER TABLE.",
+      "recommendation": "Mover migraciones a un paso separado antes de aceptar conexiones (Starlette lifespan). Usar INSERT OR IGNORE para schema_version como lock."
+    },
+    {
+      "id": "ARCH-07",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/state/models.py",
+      "line": 1,
+      "title": "Pydantic models defined but unused in runtime",
+      "description": "Plan, Task, Review, Agent, Message, Thread con validación Pydantic existen pero NUNCA se instancian. Toda la data viaja como dict desde SQLite Row a json.dumps(). Skill es el único modelo usado.",
+      "impact": "Cero validación en runtime. Fechas sin formato consistente. Los bugs CODE-03/04/05/11 (JSON injection) se resolverían automáticamente usando Pydantic serialization.",
+      "recommendation": "Usar model_validate en handlers de lectura y model_dump(mode='json') para respuestas consistentes y seguras."
+    },
+    {
+      "id": "ARCH-08",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 112,
+      "title": "plan.create bypasses state machine by inserting at tasks_ready",
+      "description": "plan.create inserta directamente con status='tasks_ready', saltándose las transiciones idle→planning→tasks_ready definidas en state_machine.py. No hay paso de 'planning' explícito.",
+      "impact": "La state machine de planes es incoherente: define un flujo idle→planning→tasks_ready pero ningún plan pasa por planning. La métrica 'planes en planning' siempre es 0.",
+      "recommendation": "Insertar con status='idle' y requerir plan.update para avanzar, o sincronizar el modelo de estados con la implementación real."
+    },
+    {
+      "id": "ARCH-09",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/state/state_machine.py",
+      "line": 46,
+      "title": "Plan transitions allow unrealistic paths",
+      "description": "PLAN_TRANSITIONS permite idle→tasks_ready (bypass), tasks_ready→idle (rollback indefinido), in_progress→idle (reset sin archivo). completed es terminal pero no hay tool 'plan.complete'.",
+      "impact": "El modelo permite transiciones que no representan el flujo real de trabajo. La implementación (plan.create → tasks_ready) ya desvía del modelo.",
+      "recommendation": "Revisar estados: eliminar idle/planning si no se usan, o implementar el flujo completo incluyendo plan.complete."
+    },
+    {
+      "id": "ARCH-10",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/server.py",
+      "line": 280,
+      "title": "Maintenance loop is non-cancelable, singleton not enforced",
+      "description": "_maintenance_loop creado vía asyncio.create_task sin guardar handle. No se cancela en shutdown. En SSE, cada init_db() inicia OTRO loop. Usa asyncio.sleep en ecosistema anyio.",
+      "impact": "Múltiples loops competidores pueden hacer stale reassignment duplicado. Shutdown no ordenado. Incompatible con Trio.",
+      "recommendation": "Singleton global con CancelScope. Iniciar en Starlette lifespan task. Usar anyio.sleep."
+    },
+    {
+      "id": "ARCH-11",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/agents.py",
+      "line": 186,
+      "title": "agent.set_status allows modifying any agent's status",
+      "description": "agent.set_status acepta agent_id y status sin verificar ownership. Cualquier agente autenticado puede marcar a otro como 'offline', triggerando stale reassignment.",
+      "impact": "Un agente puede sabotear el estado de otro, forzando reassignment de tareas y pérdida de contexto de trabajo.",
+      "recommendation": "Verificar que args._agent_id (inyectado por server) coincida con el agent_id solicitado. Solo self-status modification."
+    },
+    {
+      "id": "ARCH-12",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/agents.py",
+      "line": 117,
+      "title": "INSERT OR REPLACE in heartbeat overwrites agent metadata",
+      "description": "agent.heartbeat usa INSERT OR REPLACE que sobreescribe metadata y role en cada llamada. COALESCE preserva connected_since pero otros campos se pierden.",
+      "impact": "Cualquier metadata externa (agregada por admin en DB) se pierde en el próximo heartbeat del agente.",
+      "recommendation": "Usar INSERT ... ON CONFLICT(agent_id) DO UPDATE SET para actualizar solo campos de presencia sin tocar role ni metadata."
+    },
+    {
+      "id": "ARCH-13",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py",
+      "line": 24,
+      "title": "Tool 'hello' breaks domain.action naming convention",
+      "description": "Todas las tools siguen domain.action (plan.create, task.claim, chat.send, agent.heartbeat). 'hello' es la única sin prefijo de dominio.",
+      "impact": "Inconsistencia cosmética. Clientes que rutear por dominio no tienen dominio para hello.",
+      "recommendation": "Renombrar a 'bridge.health' o 'system.ping'. Mantener 'hello' como alias."
+    },
+    {
+      "id": "ARCH-14",
+      "severity": "LOW",
+      "file": "src/agent_bridge/tools/",
+      "line": 1,
+      "title": "inputSchema missing additionalProperties: false on all tools",
+      "description": "Ningún inputSchema define additionalProperties: false. Clientes MCP pueden enviar parámetros no declarados que los handlers ignoran silenciosamente.",
+      "impact": "Typos en nombres de parámetros no se detectan. Depuración difícil.",
+      "recommendation": "Agregar additionalProperties: false a todos los inputSchema."
+    },
+    {
+      "id": "ARCH-15",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py",
+      "line": 199,
+      "title": "No MCP Resources defined despite resource-like data",
+      "description": "El servidor implementa tools pero no resources. chat.read, task.list, plan.list devuelven listas que serían más naturales como Resources con suscripción. La TUI implementa polling manual cada 5s.",
+      "impact": "Polling constante incluso sin cambios. Mayor latencia de la necesaria. Otros clients MCP no pueden suscribirse a cambios.",
+      "recommendation": "Modelar chat.read y task.list como Resources con URIs tipo agent-bridge://messages/{since} y soporte de suscripción."
+    },
+    {
+      "id": "ARCH-16",
+      "severity": "INFO",
+      "file": "src/agent_bridge/main.py",
+      "line": 106,
+      "title": "request._send is private Starlette API",
+      "description": "sse.connect_sse usa request._send, un atributo privado de Starlette. No es API pública y puede romperse en upgrades.",
+      "impact": "Riesgo de rotura en upgrades de Starlette (dependencia indirecta vía MCP SDK).",
+      "recommendation": "Verificar compatibilidad en CI y monitorear si MCP SDK expone alternativa pública."
+    },
+    {
+      "id": "ARCH-17",
+      "severity": "INFO",
+      "file": "src/agent_bridge/",
+      "line": 1,
+      "title": "All responses use TextContent only, no MCP content type variety",
+      "description": "100% de respuestas son TextContent. No se usan ImageContent, EmbeddedResource, AudioContent. Correcto para caso actual pero limita extensibilidad.",
+      "impact": "No se pueden adjuntar diffs como recursos navegables ni imágenes de diagramas.",
+      "recommendation": "Documentar como decisión arquitectónica. Para diffs grandes considerar EmbeddedResource con file:// URI."
+    }
+  ]
+}

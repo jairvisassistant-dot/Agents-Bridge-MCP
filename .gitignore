@@ -16,10 +16,17 @@ wheels/
 .pytest_cache/
 
 # Internal project docs
-AGENT-BRIDGE-SPEC.md
+# AGENT-BRIDGE-SPEC.md
 
 # Project resources
-#Recursos/
+Recursos/
+Otros/
 
 # Database files
-bridge.db*
+bridge*.db
+bridge*.db-shm
+bridge*.db-wal
+
+
+# .agentes/
+# .atl/

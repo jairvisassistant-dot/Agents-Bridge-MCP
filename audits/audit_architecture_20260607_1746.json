@@ -1,0 +1,117 @@
+{
+  "meta": {
+    "type": "architecture",
+    "date": "2026-06-07 17:46",
+    "baseline": "687ee3d7a29487cbe14761181bf9356ee6ad831c"
+  },
+  "stats": {
+    "total": 10,
+    "crit": 1,
+    "high": 2,
+    "med": 4,
+    "low": 2,
+    "info": 1
+  },
+  "findings": [
+    {
+      "id": "ARCH-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/state/state_machine.py",
+      "line": 1,
+      "title": "State machine validated pre-write but not enforced at DB/transaction level",
+      "description": "validate_task_transition se llama ANTES del write, pero la verdadera guarda sigue siendo WHERE clauses. La validación ocurre en cada handler individual, no centralizada en una función db.transition_task(). Si se agrega un nuevo handler que no llama validate, no hay protección.",
+      "impact": "La máquina de estados no es un guardia arquitectónico — es validación por convención. No centralizada.",
+      "recommendation": "Crear db.transition_task(id, from_status, to_status) que valide contra el mapa y ejecute en una sola operación atómica."
+    },
+    {
+      "id": "ARCH-02",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/agents.py",
+      "line": 200,
+      "title": "Mutable role via heartbeat allows privilege escalation",
+      "description": "Config (bridge.json) define roles. Heartbeat permite role_hint que sobreescribe. No hay congelamiento de rol tras primer registro.",
+      "impact": "Escalación de privilegios. La autorización depende de mutable SQLite state.",
+      "recommendation": "Congelar rol tras primer heartbeat. Solo admin bridge.json puede cambiar roles."
+    },
+    {
+      "id": "ARCH-03",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/server.py",
+      "line": 262,
+      "title": "Tool dispatch secuencial sin dict routing",
+      "description": "Dispatch por if-elif chain. Sin aislamiento entre handlers. Error en uno afecta a otros.",
+      "impact": "Falla en cascada. Dificulta extensión con tools custom.",
+      "recommendation": "Usar dict[str, Callable] con extracción de dominio del tool name."
+    },
+    {
+      "id": "ARCH-04",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/state/models.py",
+      "line": 1,
+      "title": "Pydantic models defined but unused in runtime",
+      "description": "Plan, Task, Review, Agent, Message, Thread existen como modelos Pydantic pero NUNCA se instancian. Toda la data viaja como dict desde SQLite Row.",
+      "impact": "Cero validación de datos en runtime.",
+      "recommendation": "Usar model_validate en handlers de lectura y model_dump(mode='json') para respuestas."
+    },
+    {
+      "id": "ARCH-05",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/state/state_machine.py",
+      "line": 42,
+      "title": "Plan transitions include unrealistic paths (idle→planning exists but unused)",
+      "description": "PLAN_TRANSITIONS incluye idle→planning→tasks_ready, pero plan.create ahora inserta directo en 'planning' (antes tasks_ready). No existe tool plan.complete.",
+      "impact": "Modelo de estados con caminos no implementados. completed es terminal pero inalcanzable.",
+      "recommendation": "Implementar plan.complete o marcar completed como estado alcanzable solo por archive."
+    },
+    {
+      "id": "ARCH-06",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 307,
+      "title": "Plan delete cascade no atómico",
+      "description": "DELETE messages, threads, reviews, tasks, plans en 5 execute() separados sin transacción.",
+      "impact": "Inconsistencia de datos si el proceso crashea a mitad de la cascada.",
+      "recommendation": "Envolver toda la cascada en with_transaction()."
+    },
+    {
+      "id": "ARCH-07",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/tasks.py",
+      "line": 507,
+      "title": "Task delete no atómico",
+      "description": "DELETE reviews + DELETE tasks en execute separados.",
+      "impact": "Reviews huérfanas si el proceso crashea entre ambos DELETEs.",
+      "recommendation": "Usar with_transaction()."
+    },
+    {
+      "id": "ARCH-08",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py",
+      "line": 29,
+      "title": "Tool 'hello' rompe convención domain.action",
+      "description": "Todas las tools siguen domain.action (plan.create, task.claim). 'hello' es la única sin prefijo.",
+      "impact": "Inconsistencia cosmética. Clientes que rutear por dominio no tienen bucket.",
+      "recommendation": "Renombrar a 'bridge.health'. Mantener 'hello' como alias."
+    },
+    {
+      "id": "ARCH-09",
+      "severity": "LOW",
+      "file": "src/agent_bridge/tools/",
+      "line": 1,
+      "title": "inputSchema missing additionalProperties: false",
+      "description": "Ningún inputSchema define additionalProperties: false.",
+      "impact": "Typos en nombres de parámetros no se detectan.",
+      "recommendation": "Agregar additionalProperties: false a todos los inputSchema."
+    },
+    {
+      "id": "ARCH-10",
+      "severity": "INFO",
+      "file": "src/agent_bridge/main.py",
+      "line": 121,
+      "title": "request._send is private Starlette API",
+      "description": "sse.connect_sse usa request._send, atributo privado de Starlette.",
+      "impact": "Riesgo de rotura en upgrades de Starlette.",
+      "recommendation": "Monitorear si MCP SDK expone alternativa pública."
+    }
+  ]
+}

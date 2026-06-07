@@ -1,0 +1,167 @@
+{
+  "meta": {
+    "type": "code",
+    "date": "2026-06-07 17:46",
+    "baseline": "687ee3d7a29487cbe14761181bf9356ee6ad831c"
+  },
+  "stats": {
+    "total": 15,
+    "crit": 1,
+    "high": 3,
+    "med": 6,
+    "low": 3,
+    "info": 2
+  },
+  "findings": [
+    {
+      "id": "CODE-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 153,
+      "title": "Dry-run mode still caches _dry_run_conn with misleading docstring",
+      "description": "El docstring de _connect() dice 'Dry-run mode: returns a fresh :memory: connection each time (never cached)' pero el código cachea _dry_run_conn. El RLock serializa acceso, por lo que es thread-safe en la práctica, pero la documentación miente y si alguien llama _connect() sin el lock se rompe.",
+      "impact": "Documentación engañosa. Futuros refactors podrían romper thread-safety silenciosamente.",
+      "recommendation": "Sincronizar docstring con implementación o eliminar el cacheo en dry-run."
+    },
+    {
+      "id": "CODE-02",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/agents.py",
+      "line": 208,
+      "title": "INSERT OR REPLACE en heartbeat sobreescribe metadata",
+      "description": "agent.heartbeat usa INSERT OR REPLACE que sobreescribe role y metadata en cada llamada. Solo connected_since se preserva via COALESCE.",
+      "impact": "Metadata agregada por admin en DB se pierde en el próximo heartbeat.",
+      "recommendation": "Usar INSERT ... ON CONFLICT(agent_id) DO UPDATE SET para actualizar solo campos de presencia."
+    },
+    {
+      "id": "CODE-03",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/server.py",
+      "line": 76,
+      "title": "Role resolution mutable via heartbeat allows privilege escalation",
+      "description": "bridge.json define roles pero heartbeat los sobreescribe via role_hint. Un agente configurado como developer puede heartbear como architect y obtener tools de arquitecto.",
+      "impact": "Escalación de privilegios. La promesa de permisos por rol es ilusoria.",
+      "recommendation": "Congelar rol tras primer heartbeat. Solo permitir cambios via bridge.json o tool admin."
+    },
+    {
+      "id": "CODE-04",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/server.py",
+      "line": 262,
+      "title": "Tool dispatch secuencial sin isolation ni dict routing",
+      "description": "handle_call_tool itera handlers en orden fijo (plan→task→review→chat→agents→skills). Si un handler crashea, los siguientes no se ejecutan. No hay dict dispatch.",
+      "impact": "Falla en cascada: error en plan handler bloquea task handler. Dificulta extensión.",
+      "recommendation": "Usar dict[str, Callable] para dispatch directo por tool name."
+    },
+    {
+      "id": "CODE-05",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/ui/chat_tui.py",
+      "line": 186,
+      "title": "MCPClient no verifica IDs de response",
+      "description": "_request() incrementa _msg_id pero no verifica que resp['id'] == _msg_id. Timeouts causan desincronización permanente.",
+      "impact": "Desincronización silenciosa request/response en el TUI.",
+      "recommendation": "Verificar resp['id'] == _msg_id - 1. Usar dict de pending requests keyed by id."
+    },
+    {
+      "id": "CODE-06",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 216,
+      "title": "plan.update usa execute() en vez de execute_write()",
+      "description": "_update_plan usa db.execute() que no ejecuta BEGIN IMMEDIATE, a diferencia de execute_write(). UPDATE sin lock exclusivo puede causar race conditions.",
+      "impact": "Posible race condition en plan.update bajo concurrencia.",
+      "recommendation": "Usar db.execute_write() para el UPDATE."
+    },
+    {
+      "id": "CODE-07",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 307,
+      "title": "plan.delete cascade no atómico: DELETE múltiples en conexiones separadas",
+      "description": "plan.delete ejecuta DELETE messages, threads, reviews, tasks, plans en 5 llamadas execute() separadas. Si el proceso crashea a mitad, quedan datos huérfanos.",
+      "impact": "Inconsistencia de datos: reviews sin tasks, tasks sin plan.",
+      "recommendation": "Envolver toda la cascada en with_transaction()."
+    },
+    {
+      "id": "CODE-08",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 233,
+      "title": "_connect() no enforce lock ownership",
+      "description": "_connect() retorna la conexión singleton sin verificar que el caller tenga el lock. Actualmente siempre se llama dentro del lock, pero no hay protección a nivel de tipo/firma.",
+      "impact": "Futuro refactor podría usar _connect() sin lock, causando race conditions.",
+      "recommendation": "Hacer _connect() privado y requerir lock explícito, o documentar el contract."
+    },
+    {
+      "id": "CODE-09",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/server.py",
+      "line": 314,
+      "title": "asyncio.create_task en ecosistema anyio para maintenance loop",
+      "description": "El maintenance loop se lanza vía asyncio.create_task dentro de un contexto anyio. Aunque hay CancelScope, la mezcla de backends puede causar problemas en Trio.",
+      "impact": "Incompatible con backends no-asyncio de anyio.",
+      "recommendation": "Usar anyio.start_task() o CancelScope nativo de anyio."
+    },
+    {
+      "id": "CODE-10",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/tasks.py",
+      "line": 507,
+      "title": "task.delete ejecuta DELETE reviews + DELETE tasks no atómico",
+      "description": "DELETE reviews y DELETE tasks en execute() separados. Si crashea entre ambos, quedan reviews huérfanas.",
+      "impact": "Inconsistencia de datos post-crash.",
+      "recommendation": "Usar with_transaction() para eliminar task + reviews atómicamente."
+    },
+    {
+      "id": "CODE-11",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py",
+      "line": 207,
+      "title": "Tipo impreciso en create_server",
+      "description": "return type es tuple[Server, callable]. callable no revela la firma. Debería ser Callable[[], Awaitable[None]].",
+      "impact": "Linters no pueden verificar el tipo correctamente.",
+      "recommendation": "Usar Callable[[], Awaitable[None]] de collections.abc."
+    },
+    {
+      "id": "CODE-12",
+      "severity": "LOW",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 238,
+      "title": "Sin timeout en operaciones DB vía anyio.to_thread.run_sync",
+      "description": "Todas las operaciones DB pasan por anyio.to_thread.run_sync sin timeout.",
+      "impact": "Potenciales freezes del servidor bajo alta contención.",
+      "recommendation": "Usar anyio.to_thread.run_sync(func, cancellable=True) con fail_after timeout."
+    },
+    {
+      "id": "CODE-13",
+      "severity": "LOW",
+      "file": "src/agent_bridge/main.py",
+      "line": 121,
+      "title": "Uso de API privada request._send en SSE handler",
+      "description": "request._send es atributo privado de Starlette.",
+      "impact": "Rotura silenciosa al actualizar Starlette.",
+      "recommendation": "Usar API pública de Starlette/ASGI."
+    },
+    {
+      "id": "CODE-14",
+      "severity": "INFO",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 29,
+      "title": "Módulo chat/__init__.py vacío (chat.py existe en tools/)",
+      "description": "El directorio src/agent_bridge/chat/ existe con __init__.py vacío. No se referencia.",
+      "impact": "Código muerto. Confunde la estructura.",
+      "recommendation": "Eliminar el directorio chat/."
+    },
+    {
+      "id": "CODE-15",
+      "severity": "INFO",
+      "file": "src/agent_bridge/",
+      "line": 1,
+      "title": "ruff reporta 13 errores",
+      "description": "2 unused imports, 2 datetime.UTC alias, 9 otros. 5 fixables con --fix.",
+      "impact": "Calidad de código reducida.",
+      "recommendation": "Ejecutar ruff --fix y corregir manualmente los restantes."
+    }
+  ]
+}

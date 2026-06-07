@@ -1,0 +1,107 @@
+{
+  "meta": {
+    "type": "product",
+    "date": "2026-06-07 17:46",
+    "baseline": "687ee3d7a29487cbe14761181bf9356ee6ad831c"
+  },
+  "stats": {
+    "total": 10,
+    "crit": 2,
+    "high": 3,
+    "med": 4,
+    "low": 1,
+    "info": 0
+  },
+  "findings": [
+    {
+      "id": "PROD-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/main.py:28-36",
+      "title": "--ui-only promise vs reality disconnect",
+      "description": "README describe --ui-only como 'conectarse a server existente', pero el TUI spawns su propio subproceso stdio independiente. Ambos procesos comparten solo el archivo SQLite, no hay conexión SSE real.",
+      "impact": "Modelo mental incorrecto de la topología. Dos procesos con DB paths distintos operan sobre datos diferentes sin advertencia.",
+      "recommendation": "Renombrar a --standalone y documentar la topología real. O implementar conexión SSE desde el TUI."
+    },
+    {
+      "id": "PROD-02",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/ui/chat_tui.py:342",
+      "title": "Chat 'en tiempo real' es polling de 5s sin push",
+      "description": "SPEC promete 'mensajes en tiempo real'. TUI usa polling cada 5s. Agentes no reciben push — deben llamar chat.read en cada ciclo.",
+      "impact": "Latencia real de 5-15s. El humano escribe 'pará' y el agente sigue ejecutando segundos sin saberlo.",
+      "recommendation": "Reemplazar 'en tiempo real' por 'asincrónico con polling'. Implementar SSE push para baja latencia real."
+    },
+    {
+      "id": "PROD-03",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/main.py:706",
+      "title": "Reset prompt omite agents, threads y reviews",
+      "description": "El prompt dice 'borrará TODOS los datos (planes, tareas, mensajes)' pero agents, threads y reviews también se eliminan.",
+      "impact": "Usuario puede pensar que el reset preserva config de agentes.",
+      "recommendation": "Actualizar prompt con lista completa."
+    },
+    {
+      "id": "PROD-04",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/chat.py:460-478",
+      "title": "@mention 'no envía si offline' — solo warning, no rechazo",
+      "description": "SPEC dice 'NO enviar si está offline'. La implementación SIEMPRE inserta el mensaje y solo adjunta un warning.",
+      "impact": "Promesa de seguridad no cumplida. Los mensajes se entregan a agentes offline.",
+      "recommendation": "Implementar el rechazo real o actualizar la SPEC."
+    },
+    {
+      "id": "PROD-05",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/ui/chat_tui.py:186-220",
+      "title": "TUI pierde sincronización request/response sin indicación visible",
+      "description": "MCPClient._request no verifica resp['id'] contra _msg_id. Timeouts causan desincronización permanente.",
+      "impact": "El humano ve datos corruptos en la TUI sin saberlo.",
+      "recommendation": "Verificar resp['id']. Agregar indicador de salud de conexión en status bar."
+    },
+    {
+      "id": "PROD-06",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/main.py:44-86",
+      "title": "TUI y SSE server son procesos independientes sin health check entre sí",
+      "description": "Dos servidores MCP compitiendo: SSE server (subproceso) y stdio server del TUI (otro subproceso). No hay comunicación directa.",
+      "impact": "Si el SSE server crashea, el TUI no lo sabe. El humano ve agentes online en la TUI mientras el server ya no responde.",
+      "recommendation": "El TUI debería heartbear al SSE server para verificar disponibilidad."
+    },
+    {
+      "id": "PROD-07",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/agents.py:200-203",
+      "title": "Rol mutable vía heartbeat permite escalación de privilegios",
+      "description": "agent.heartbeat acepta role_hint que sobreescribe el rol del agente en DB.",
+      "impact": "Promesa de permisos por rol ilusoria. Sin warning visible en TUI cuando un rol cambia.",
+      "recommendation": "Congelar rol tras primer heartbeat. Mostrar cambio de rol en TUI."
+    },
+    {
+      "id": "PROD-08",
+      "severity": "MEDIUM",
+      "file": "README.md",
+      "title": "Documentación sin troubleshooting ni FAQ",
+      "description": "README no tiene troubleshooting, FAQ, problemas conocidos o guía de recuperación.",
+      "impact": "Cada error que encuentra un usuario nuevo es una barrera sin resolución documentada.",
+      "recommendation": "Agregar sección de Troubleshooting con escenarios comunes."
+    },
+    {
+      "id": "PROD-09",
+      "severity": "MEDIUM",
+      "file": "AGENT-BRIDGE-SPEC.md",
+      "title": "State machine documentada no coincide con el sistema real",
+      "description": "README y SPEC muestran diagramas de estados que no corresponden. No existe tool plan.complete. completed es terminal pero inalcanzable.",
+      "impact": "El usuario aprende un modelo de flujo que no existe.",
+      "recommendation": "Sincronizar documentación con implementación."
+    },
+    {
+      "id": "PROD-10",
+      "severity": "LOW",
+      "file": "src/agent_bridge/main.py:709",
+      "title": "Export falla sin sugerir alternativas",
+      "description": "agent-bridge export <id> responde 'Plan not found' sin sugerir usar plan.list.",
+      "impact": "Frustración menor.",
+      "recommendation": "Incluir sugerencia de plan.list en el mensaje de error."
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "compile: vscode extension",
+      "type": "npm",
+      "script": "compile",
+      "path": "extensions/vscode/",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "install: project",
+      "type": "shell",
+      "command": "uv",
+      "args": [
+        "sync",
+        "--all-extras"
+      ],
+      "group": "none",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "start: server (headless)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "-m",
+        "agent_bridge",
+        "start",
+        "--headless",
+        "--port", "8765",
+        "--db-path", "${workspaceFolder}/bridge-dev.db"
+      ],
+      "isBackground": true,
+      "problemMatcher": []
+    }
+  ]
+}

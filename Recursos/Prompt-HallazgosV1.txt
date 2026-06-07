@@ -10,7 +10,7 @@ Ahora quiero que analices tus hallazgos (/home/jilz/Escritorio/Agents-Bridge-MCP
 Para finalizar documenta sobre el mismo archivo (/home/jilz/Escritorio/Agents-Bridge-MCP/Recursos/Plan-HallazgosV1.md) en la parte final los hallazgos encontrados
 
 
-Antes de empezar con la ejecución de la fase 1 debes tener muy clara el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades que vas a modificar, esto con el objetivo de no afectar otras funcionalidades que estan bien, cada cambio o modificación debe de ser quirurgico
+Antes de empezar con la corrección de cada hallazgo debes tener muy claro el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades que vas a modificar, esto con el objetivo de no afectar otras funcionalidades que estan bien, cada cambio o modificación debe de ser quirurgico
 
 
 Eres un experto desarrollador de software.
@@ -18,11 +18,11 @@ Toma como referencia los hallazgos /home/jilz/Escritorio/Agents-Bridge-MCP/Recur
 Antes de empezar debes tener muy claro el objetivo y el alcance de todo el codigo y de cada una de las funcionalidades para que sepas si el resultado es correcto o no, determina si los cambios realizados fueron correctos o no o si han agregado regresiones al codigo, siempre debe ser un codigo seguro sin vulnerabilidades ni bugs
 
 
-Resumen rápido para desarrollo local                                                                                                                               src/agent_bridge/tools/review +28 -16   
-                                                                                                                                                                        src/agent_bridge/tools/tasks. +42 -23   
-     # Terminal 1 — servidor standalone (para probar tools)                                                                                                             tests/test_database_refactor.p +49 -6   
-     cd /home/jilz/Escritorio/Agents-Bridge-MCP                                                                                                                         tests/test_edge_cases.py         +210   
-     source .venv/bin/activate                                                                                                                                          tests/test_state_machine.py       +18   
+Resumen rápido para desarrollo local        
+
+     # Terminal 1 — servidor standalone (para probar tools) tests/test_database_refactor.p +49 -6   
+     cd /home/jilz/Escritorio/Agents-Bridge-MCP/test_edge_cases.py         +210   
+     source .venv/bin/activate        tests/test_state_machine.py       +18   
      pip install -e ".[test]"                                                                                                                                                                                   
      python -m agent_bridge start --headless --port 8765 --db-path /tmp/test.db                                                                                                                                 
                                                                                                                                                                                                                 
@@ -34,6 +34,42 @@ Resumen rápido para desarrollo local                                           
      Para la extensión VSCode completa, lo más simple es:                                                                                                                                                       
                                                                                                                                                                                                                 
      # Con uv tool                                                                                                                                                                                              
-     uv tool install /home/jilz/Escritorio/Agents-Bridge-MCP                                                                                                                                                    
+     uv tool install /home/jilz/Escritorio/Agents-Bridge-MCP                      
      cd extensions/vscode && npm install && npm run compile                                                                                                                                                     
-     # Abrí VSCode, F5, y probás la extensión en el host de desarrollo     
+     # Abrí VSCode, F5, y probás la extensión en el host de desarrollo   
+
+
+
+Lo que descubrÃ­ revisando el proyecto
+El problema de conexiÃ³n no es (solamente) la extensiÃ³n de VS Code. Agent Bridge tiene tres componentes que tienen que estar sincronizados:
+*** situaciÃ³n actual
+TenÃ©s OpenCode acÃ¡ (gentle-orchestrator) y Claude Code en otra terminal, pero:
+1. No veo un bridge.json en la raÃ­z del proyecto â si no existe, los agentes no tienen roles definidos
+2. No se levantÃ³ el servidor Agent Bridge primero â requisito #1
+3. La extensiÃ³n de VS Code ayuda pero no es necesaria para que los agentes se conecten
+â Checklist urgente (orden obligatorio)
+# 1. Pararte en el proyecto
+cd /home/jilz/Escritorio/Agents-Bridge-MCP
+# 2. Instalar dependencias (si no lo hiciste)
+uv sync
+# 3. Instalar agent-bridge globalmente (recomendado)
+uv tool install --editable .
+# 4. Inicializar configuraciÃ³n (crea bridge.json)
+agent-bridge init
+# 5. LEVANTAR EL SERVIDOR (esto es lo que falta)
+agent-bridge start --headless
+#   â Dejalo corriendo en una terminal
+ReciÃ©n ahÃ­, en las otras terminales:
+- En OpenCode: @dev.Skill
+- En Claude Code: @architect.Skill
+ð¦ Sobre la extensiÃ³n de VS Code
+El proyecto tiene una extensiÃ³n custom en extensions/vscode/ (no es la de OpenCode). Para instalarla:
+cd extensions/vscode
+npm install && npm run compile
+# Y luego F5 en VS Code o empaquetar con npx vsce package  
+
+
+
+
+./run-server.sh --tui
+

@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { type ConnectionState } from './types';
+import { type ConnectionState, type HealthStatus } from './types';
 
 /**
  * Status bar indicator for Agent Bridge connection state.
@@ -20,18 +20,35 @@ export class BridgeStatusBar {
     context.subscriptions.push(this.statusBarItem);
   }
 
-  /**
-   * Update the status bar to reflect the current connection state.
-   *
-   * @param state        One of disconnected, connecting, connected, error.
-   * @param agentCount   Number of agents currently connected (only relevant when connected).
-   * @param terminalCount Number of active terminal sessions.
-   */
-  update(
-    state: ConnectionState,
-    agentCount: number,
-    terminalCount: number,
-  ): void {
+/**
+ * Update the status bar to reflect the current connection and health state.
+ *
+ * @param state         Connection state (disconnected, connecting, connected, etc.).
+ * @param agentCount    Number of agents currently connected.
+ * @param terminalCount Number of active terminal sessions.
+ * @param health        Optional health status — shown when connected but unhealthy.
+ * @param pendingCount  Optional count of undelivered mentions/terminal messages.
+ */
+update(
+  state: ConnectionState,
+  agentCount: number,
+  terminalCount: number,
+  health?: HealthStatus,
+  pendingCount?: number,
+): void {
+    // ── Connected but unhealthy takes visual priority ──────────────
+    if (state === 'connected' && health === 'unhealthy') {
+      this.statusBarItem.text = '$(warning) Agent Bridge: Unhealthy';
+      this.statusBarItem.tooltip =
+        'Bridge process is alive but not responding \u2014 click to restart';
+      this.statusBarItem.backgroundColor = new vscode.ThemeColor(
+        'statusBarItem.warningBackground',
+      );
+      this.statusBarItem.command = 'agent-bridge.restart';
+      this.statusBarItem.show();
+      return;
+    }
+
     switch (state) {
       case 'disconnected':
         this.statusBarItem.text = '$(debug-disconnect) Agent Bridge: Disconnected';
@@ -62,11 +79,17 @@ export class BridgeStatusBar {
         break;
 
       case 'connected': {
+        const healthSuffix = health === 'unknown' ? ' \u2014 checking\u2026' : '';
         const agents = agentCount === 1 ? '1 agent' : `${agentCount} agents`;
         const terminals =
           terminalCount === 1 ? '1 terminal' : `${terminalCount} terminals`;
-        this.statusBarItem.text = `$(hubot) Agent Bridge: ${agents} \u00b7 ${terminals}`;
-        this.statusBarItem.tooltip = `${agentCount} agent(s), ${terminalCount} terminal(s) connected`;
+        const pending =
+          pendingCount && pendingCount > 0
+            ? ` \u00b7 $(mail) ${pendingCount} pending`
+            : '';
+        this.statusBarItem.text = `$(hubot) Agent Bridge: ${agents} \u00b7 ${terminals}${pending}${healthSuffix}`;
+        this.statusBarItem.tooltip = `${agentCount} agent(s), ${terminalCount} terminal(s) connected` +
+          (pendingCount && pendingCount > 0 ? `, ${pendingCount} pending` : '');
         this.statusBarItem.backgroundColor = undefined;
         this.statusBarItem.command = 'agent-bridge.showMenu';
         break;

@@ -27,10 +27,7 @@ def _handle_start(args: argparse.Namespace) -> None:
     # ── UI-only mode: just launch the TUI ──────────────────────────
     if args.ui_only:
         logger.info("Starting TUI standalone (direct DB mode, no SSE server)")
-        if getattr(args, "kanban", False):
-            from agent_bridge.ui.kanban_tui import main as tui_main
-        else:
-            from agent_bridge.ui.chat_tui import main as tui_main
+        from agent_bridge.ui.kanban_tui import main as tui_main
 
         tui_main(db_path=db_path, dry_run=dry_run)
         return
@@ -75,10 +72,7 @@ def _handle_start(args: argparse.Namespace) -> None:
     time.sleep(1)
 
     try:
-        if getattr(args, "kanban", False):
-            from agent_bridge.ui.kanban_tui import main as tui_main
-        else:
-            from agent_bridge.ui.chat_tui import main as tui_main
+        from agent_bridge.ui.kanban_tui import main as tui_main
 
         tui_main(db_path=db_path, dry_run=dry_run)
     finally:
@@ -114,9 +108,11 @@ def _run_sse_server(
             dry_run=dry_run,
         )
 
+    import os as _os
     import uvicorn
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
     from starlette.routing import Mount, Route
 
     sse = SseServerTransport("/messages/")
@@ -130,8 +126,15 @@ def _run_sse_server(
                 server.create_initialization_options(),
             )
 
+    async def health_endpoint(_request):
+        return JSONResponse({
+            "status": "ok",
+            "pid": _os.getpid(),
+        })
+
     app = Starlette(
         routes=[
+            Route("/health", endpoint=health_endpoint),
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ]
@@ -932,7 +935,7 @@ def main() -> None:
     start_parser.add_argument(
         "--kanban",
         action="store_true",
-        help="Use the kanban TUI instead of the chat TUI",
+        help="(default) Use the kanban TUI",
     )
     start_parser.add_argument(
         "--dry-run",
@@ -1091,8 +1094,7 @@ def main() -> None:
         return
 
     if args.command == "kanban":
-        # Reuse start handler with kanban mode forced on
-        args.kanban = True
+        # Reuse start handler — kanban is the default TUI
         args.headless = False
         args.ui_only = False
         _handle_start(args)

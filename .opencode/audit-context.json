@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "generated_at": "2026-06-07T17:46:12Z",
+    "project_root": "/home/jilz/Escritorio/Agents-Bridge-MCP",
+    "stack_type": "python",
+    "framework": "Python / Textual TUI"
+  },
+  "baseline": {
+    "hash": "687ee3d7a29487cbe14761181bf9356ee6ad831c",
+    "source": "HEAD actual",
+    "branch": "master",
+    "worktree": "modificado",
+    "commits_since": 0,
+    "diff_mode": "687ee3d7a29487cbe14761181bf9356ee6ad831c..HEAD + working tree modificado",
+    "modified_files": []
+  },
+  "project": {
+    "framework": "Python / Textual TUI",
+    "total_source_files": 29,
+    "test_files": 13,
+    "src_extensions": "*.py"
+  },
+  "dependencies": {
+    "prod_count": 9,
+    "dev_count": 0,
+    "details": {"mcp": "1.27.1", "aiosqlite": "0.22.1", "textual": "8.2.6", "httpx": "0.28.1", "pydantic": "2.13.4"}
+  }
+}

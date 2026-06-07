@@ -1,0 +1,59 @@
+{
+  "meta": {
+    "type": "consolidated",
+    "date": "2026-05-14 02:26",
+    "baseline": "7179d78b1f66d46b88520a8aff80491c82c2e21d",
+    "pipeline": "code -> architecture -> product"
+  },
+  "summary": {
+    "total": 50,
+    "crit": 5,
+    "high": 15,
+    "med": 16,
+    "low": 10,
+    "info": 4,
+    "build": "ok",
+    "tests": "119 passed, 1 failed (tests/test_integration.py::TestStdioIntegration::test_full_workflow_via_stdio)",
+    "linter": "no configurado",
+    "integrity_verdict": "FAILED",
+    "by_skill": {
+      "code": { "total": 18, "crit": 1, "high": 6, "med": 5, "low": 4, "info": 2 },
+      "architecture": { "total": 17, "crit": 2, "high": 4, "med": 6, "low": 3, "info": 2 },
+      "product": { "total": 15, "crit": 2, "high": 5, "med": 5, "low": 3, "info": 0 }
+    }
+  },
+  "top_critical": [
+    {
+      "id": "CODE-01",
+      "title": "Dry-run comparte conexión SQLite entre threads",
+      "why_it_matters": "rompe seguridad de concurrencia y puede producir crashes o estado corrupto"
+    },
+    {
+      "id": "ARCH-01",
+      "title": "La state machine no protege escrituras reales",
+      "why_it_matters": "el modelo de estados documentado no gobierna el comportamiento del sistema"
+    },
+    {
+      "id": "ARCH-02",
+      "title": "Patrón per-call de SQLite impide atomicidad transaccional real",
+      "why_it_matters": "genera inconsistencias entre writes relacionados y debilita el diseño completo"
+    },
+    {
+      "id": "PROD-01",
+      "title": "--ui-only promete una topología que no existe",
+      "why_it_matters": "el operador entiende mal cómo se conecta el sistema y puede trabajar sobre estados distintos"
+    },
+    {
+      "id": "PROD-02",
+      "title": "El chat no es en tiempo real aunque la docs lo prometen",
+      "why_it_matters": "erosiona control operacional y confianza del humano sobre el broker"
+    }
+  ],
+  "priority_fixes": [
+    "Hacer thread-safe el modo dry-run o retirarlo hasta corregirlo.",
+    "Unificar el modelo de persistencia/transacciones alrededor de una estrategia atómica consistente.",
+    "Congelar roles y cerrar privilege escalation vía heartbeat y agent.set_status.",
+    "Corregir todas las respuestas JSON construidas con f-strings usando json.dumps/Pydantic.",
+    "Alinear README/SPEC/CLI con el comportamiento real del sistema (ui-only, realtime, configure, state machine)."
+  ]
+}

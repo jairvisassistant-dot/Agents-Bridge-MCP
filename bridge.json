@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "id": "claude-code-1",
+      "name": "Terminal Principal",
+      "role": "architect",
+      "metadata": {
+        "type": "claude-code"
+      }
+    },
+    {
+      "id": "opencode-1",
+      "name": "Terminal Secundaria",
+      "role": "developer",
+      "metadata": {
+        "type": "opencode"
+      }
+    }
+  ],
+  "settings": {
+    "heartbeat_interval_seconds": 30,
+    "offline_timeout_seconds": 300,
+    "default_skill": "default"
+  }
+}

@@ -22,7 +22,7 @@ import anyio
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 8  # bump this when adding migrations below
+SCHEMA_VERSION = 9  # bump this when adding migrations below
 
 _WRITE_PREFIXES = ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP")
 
@@ -116,6 +116,15 @@ CREATE TABLE IF NOT EXISTS pending_mentions (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     delivered INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS terminal_messages (
+    id TEXT PRIMARY KEY,
+    target_role TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -187,9 +196,26 @@ def _run_migrations(conn: sqlite3.Connection, from_version: int) -> None:
         """)
         logger.info("Migration v7→v8: added pending_mentions table (PROD-04 recovery)")
 
+    if from_version < 9:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS terminal_messages (
+                id TEXT PRIMARY KEY,
+                target_role TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                delivered INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        logger.info("Migration v8→v9: added terminal_messages table (cross-terminal notification)")
+
 
 def _run_reverse_migrations(conn: sqlite3.Connection, from_version: int) -> None:
     """Run reverse migrations to downgrade schema version."""
+    if from_version >= 9:
+        conn.execute("DROP TABLE IF EXISTS terminal_messages")
+        logger.info("Reverse migration v9→v8: dropped terminal_messages table")
+
     if from_version >= 8:
         conn.execute("DROP TABLE IF EXISTS pending_mentions")
         logger.info("Reverse migration v8→v7: dropped pending_mentions table")
@@ -888,6 +914,70 @@ class Database:
             return delivered
 
         return await self.with_transaction(_do_deliver)
+
+    # ── Cross-terminal messages (Feature 2) ─────────────────────
+
+    async def queue_terminal_message(
+        self, target_role: str, sender: str, text: str,
+    ) -> str:
+        """Queue a message for delivery to an agent's terminal.
+
+        Returns the message ID. The message will be delivered when the
+        extension's next poll cycle picks it up, or immediately if the
+        agent is connected via terminal (extension handles delivery).
+        """
+        msg_id = str(uuid.uuid4())
+        await self.execute_write(
+            "INSERT INTO terminal_messages (id, target_role, sender, text) "
+            "VALUES (?, ?, ?, ?)",
+            (msg_id, target_role, sender, text),
+        )
+        logger.info("Queued terminal message %s for role %s", msg_id, target_role)
+        return msg_id
+
+    async def get_pending_terminal_messages(self, role: str) -> list[dict]:
+        """Return all undelivered terminal messages for a given role."""
+        rows = await self.execute(
+            "SELECT * FROM terminal_messages WHERE target_role = ? AND delivered = 0 "
+            "ORDER BY created_at ASC",
+            (role,),
+        )
+        return [dict(r) for r in rows]
+
+    async def deliver_terminal_messages_for_role(self, role: str) -> list[dict]:
+        """Deliver ALL pending terminal messages for a role (mark as delivered).
+
+        Returns the list of delivered message dicts so the caller (extension
+        or TUI) can display them. Uses a transaction for atomicity.
+        """
+
+        def _do_deliver(conn: sqlite3.Connection) -> list[dict]:
+            rows = conn.execute(
+                "SELECT * FROM terminal_messages WHERE target_role = ? AND delivered = 0 "
+                "ORDER BY created_at ASC",
+                (role,),
+            ).fetchall()
+            if not rows:
+                return []
+
+            delivered = []
+            for row in rows:
+                r = dict(row)
+                conn.execute(
+                    "UPDATE terminal_messages SET delivered = 1 WHERE id = ?",
+                    (r["id"],),
+                )
+                delivered.append(r)
+            return delivered
+
+        return await self.with_transaction(_do_deliver)
+
+    async def count_pending_terminal_messages(self) -> int:
+        """Return total count of undelivered terminal messages."""
+        row = await self.execute_one(
+            "SELECT COUNT(*) AS cnt FROM terminal_messages WHERE delivered = 0",
+        )
+        return row["cnt"] if row else 0
 
     async def count_pending_mentions(self) -> int:
         """Return total count of undelivered pending mentions."""

@@ -1,0 +1,100 @@
+---
+name: software-audit-orchestrator
+description: "Trigger: auditar completa, auditar todo, ejecutar pipeline completo, pre-deploy check. Orquestador de auditorías multi-fase para Agent Bridge. Ejecuta pipeline: código → arquitectura → DX → reporte consolidado."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "2.0"
+---
+
+## When to Use
+
+- "auditar completa", "auditar todo", "ejecutar pipeline completo"
+- Pre-deploy check que cubra todas las dimensiones
+- El usuario no especifica qué tipo de auditoría → pipeline completo
+
+## Qué NO hace
+
+```
+NO audita código → software-code-auditor
+NO audita arquitectura → software-architecture-auditor
+NO audita DX/producto → software-dx-auditor
+NO verifica fixes → software-audit-verifier
+```
+
+**Única responsabilidad: pipeline, contexto, consolidación.**
+
+## Metodología — Pipeline de 5 Fases
+
+### FASE 0 — Baseline + Tests (OBLIGATORIO)
+
+1. Registrar baseline: commit actual, diff status, branch:
+   ```bash
+   echo "baseline: $(git rev-parse HEAD)" > audits/.baseline
+   echo "branch: $(git branch --show-current)" >> audits/.baseline
+   echo "diff: $(git diff --stat)" >> audits/.baseline
+   ```
+
+2. Ejecutar tests:
+   ```bash
+   uv run pytest -q 2>&1 | tail -10
+   ```
+   Si fallan → pipeline se detiene con hallazgo CRITICAL.
+
+3. Crear estructura `audits/` si no existe:
+   ```bash
+   mkdir -p audits
+   ```
+
+### FASE 1 — Auditoría de Código
+Cargar `software-code-auditor.Skill`. Pasar contexto del proyecto.
+Al finalizar: leer `audits/audit_code_*.json` para extraer hallazgos.
+
+### FASE 2 — Auditoría de Arquitectura
+Cargar `software-architecture-auditor.Skill`. Pasar contexto + hallazgos de FASE 1.
+Al finalizar: leer `audits/audit_architecture_*.json`.
+
+### FASE 3 — Auditoría de DX (Developer Experience)
+Cargar `software-dx-auditor.Skill`. Pasar contexto + hallazgos de FASE 1 y 2.
+Al finalizar: leer `audits/audit_dx_*.json`.
+
+### FASE 4 — Reporte Consolidado
+
+Generar `audits/audit_consolidated_YYYYMMDD_HHMM.md`:
+
+```markdown
+# Auditoría Consolidada — Agent Bridge
+
+**Baseline**: {commit}
+**Branch**: {branch}
+**Fecha**: {fecha}
+
+## Resumen
+| Dimensión | CRITICAL | HIGH | MEDIUM | LOW |
+|-----------|----------|------|--------|-----|
+| Código    | {n}      | {n}  | {n}    | {n} |
+| Arq       | {n}      | {n}  | {n}    | {n} |
+| DX        | {n}      | {n}  | {n}    | {n} |
+
+## Hallazgos por severidad
+{lista de hallazgos ordenados por severidad}
+
+## Top 3 prioridades
+1. {hallazgo más crítico}
+2. {siguiente}
+3. {siguiente}
+```
+
+## Input Contract
+
+| Contexto | Generado por |
+|---|---|
+| Baseline, branch, diff | FASE 0 |
+| Test status | FASE 0 |
+| Hallazgos code | FASE 1 |
+| Hallazgos arch | FASE 2 |
+| Hallazgos dx | FASE 3 |
+
+## Output Contract
+
+`audits/audit_consolidated_YYYYMMDD_HHMM.md`

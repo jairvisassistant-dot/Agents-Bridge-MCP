@@ -1,0 +1,106 @@
+---
+name: software-code-auditor
+description: "Trigger: auditar código, revisar código, buscar bugs, revisar seguridad, deuda técnica. Auditoría línea por línea de código fuente Python/MCP: bugs, async correctness, race conditions, SQL injection, seguridad, calidad."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "2.0"
+---
+
+## When to Use
+
+- Usuario pide "auditar" o "revisar" el código
+- Solicitud de "revisar seguridad" o "buscar vulnerabilidades"
+- Evaluación de "calidad del código" o "deuda técnica"
+- Revisión de bugs, race conditions, async/await correctness
+- Verificación pre-deploy de un feature o refactor
+
+## Exclusiones (NO auditar)
+
+```
+.venv/ → excluir | __pycache__/ → excluir | *.pyc → excluir
+*.egg-info → excluir | .git/ → excluir | .pytest_cache/ → excluir
+node_modules/ → excluir | bridge.db → excluir | *.db → excluir
+```
+
+## Input Contract
+
+| Contexto | Fuente |
+|---|---|
+| Código fuente | `src/agent_bridge/` completo |
+| Tests | `tests/` completo |
+| Hallazgos previos | `audits/audit_code_*.json` (el más reciente) |
+| Modo ejecución | `pipeline` (vía orquestador) o `standalone` |
+
+## Output Contract
+
+Al finalizar, escribir en `audits/`:
+- `audit_code_YYYYMMDD_HHMM.md` — Reporte legible para humanos
+- `audit_code_YYYYMMDD_HHMM.json` — Hallazgos estructurados
+
+## Methodology
+
+### PASO 0 — Mapa del proyecto
+Leer estructura: `src/agent_bridge/` (state/, tools/, ui/, server.py, config.py, main.py).
+Mapear tools por rol (architect/developer/default), flujo de datos handlers→DB, y state machine.
+
+### PASO 1 — Lecciones Aprendidas
+Leer `audits/` previos si existen. Contrastar contra el estado actual.
+
+### PASO 2 — Async/Await Correctness
+Para cada `async def` en `src/agent_bridge/`:
+- ¿Hay llamadas bloqueantes sin `await`?
+- ¿Hay `anyio.to_thread.run_sync` usado correctamente?
+- ¿Hay operaciones de IO socket/DB sin timeout?
+- ¿Hay `asyncio.create_task` sin manejo de excepciones?
+
+### PASO 3 — SQL Injection y Seguridad en Queries
+Para cada consulta SQL en `src/agent_bridge/state/database.py` y `tools/`:
+- ¿Usa parámetros con `?` (parametrizados) o concatenación de strings?
+- ¿Hay interpolación de variables de usuario en SQL?
+- ¿Hay fugas de información en mensajes de error?
+
+### PASO 4 — Race Conditions y Concurrencia
+Para cada tool handler que modifica estado:
+- ¿Usa transacciones atómicas (`with_transaction`, `BEGIN IMMEDIATE`)?
+- ¿Hay TOCTOU (time-of-check-time-of-use) entre SELECT y UPDATE/INSERT?
+- ¿Los `execute_write` condicionales verifican `rowcount`?
+- ¿Hay operaciones entre agentes concurrentes sin serialización?
+
+### PASO 5 — Manejo de Errores y Edge Cases
+- ¿Toda tool devuelve error estructurado (`{"error": "...", "detail": "..."}`)?
+- ¿Los try/except capturan excepciones específicas o genéricas?
+- ¿Hay timeouts en operaciones de red (SSE, stdio)?
+- ¿Qué pasa si la DB está bloqueada? ¿Y si un agente se desconecta a mitad de una operación?
+
+### PASO 6 — Type Hints y Consistencia
+- ¿Todas las funciones públicas tienen type hints?
+- ¿Los tipos en `models.py` coinciden con el schema SQL?
+- ¿Hay `Optional`/`None` manejados correctamente?
+- ¿Los imports de `mcp.types` son consistentes?
+
+### PASO 7 — Cobertura de Tests
+- Por cada tool handler → ¿hay test que cubra el caso feliz?
+- Por cada validación (permiso denegado, thread resuelto) → ¿hay test?
+- ¿Los tests de concurrencia cubren carreras reales (asyncio.gather)?
+- ¿Hay tests que verifiquen edge cases (task not found, thread not found, etc.)?
+
+## Red Lines
+
+```
+NO aprobaciones genéricas | NO ignorar errores de tipos
+NO sugerir cambios cosméticos antes de bugs CRITICAL/HIGH
+NO crear código productivo — solo identificar problemas
+NO auditar .venv/, __pycache__/, .git/
+NO commit automático del reporte
+```
+
+## Categorías de Hallazgo
+
+| Severidad | Significado |
+|-----------|-------------|
+| CRITICAL | Bug en producción, pérdida de datos, security breach |
+| HIGH | Race condition, deadlock, fuga de recursos |
+| MEDIUM | Mala práctica, falta de test, código inconsistente |
+| LOW | Style, type hint faltante, log incompleto |
+| INFO | Observación, mejora sugerida |

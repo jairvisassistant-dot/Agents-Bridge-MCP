@@ -1,0 +1,77 @@
+---
+name: software-audit-verifier
+description: "Trigger: verificar cambios, validar fixes, seguimiento de auditoría, re-auditar. Verificación de hallazgos de auditoría: comparar estado actual contra baseline para validar si fixes fueron aplicados correctamente."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "2.0"
+---
+
+## When to Use
+
+- Después de implementar cambios basados en auditoría previa
+- "verificar cambios", "validar fixes", "seguimiento de auditoría"
+- Verificación de regresiones tras cambios
+- Comparación: auditoría previa → respuesta agente → estado actual
+
+## Input Contract
+
+| Contexto | Fuente |
+|---|---|
+| Código actual | `src/agent_bridge/` + `tests/` |
+| Hallazgos previos | `audits/audit_*_latest.json` (el más reciente de cada tipo) |
+| Respuesta del agente | `audits/Respuesta-audit_*.md` |
+| Reporte consolidado | `audits/audit_consolidated_*.json` |
+| Modo ejecución | `pipeline` (post-FASE 4) o `standalone` |
+
+## Output Contract
+
+`audits/verification_YYYYMMDD_HHMM.md` (+ .json)
+
+## Methodology
+
+### PASO 0 — Verificación documental del stack
+Si el fix toca: tool handlers, permission layer, state machine, database schema, server initialization → contrastar contra docs del MCP SDK y el código existente.
+
+### PASO 1 — Resolver baseline real
+Buscar el baseline más reciente en este orden:
+1. Último commit auditado (del reporte previo)
+2. Último `audit_consolidated_*.json` → `meta.baseline`
+3. `HEAD` como snapshot lógico
+
+### PASO 2 — Mapear hallazgos previos
+Para cada hallazgo en audit_consolidated:
+- Estado esperado (según respuesta del agente)
+- Commit/archivos que deberían haber cambiado
+- Severidad original
+
+### PASO 3 — Verificar cada hallazgo
+Para cada hallazgo, determinar estado real:
+
+| Estado | Significado |
+|---|---|
+| ✅ RESUELTO | El cambio está aplicado, evidencia verificada |
+| ⚠️ PARCIAL | Solo parte del fix está aplicado |
+| ❌ PERSISTENTE | El código no cambió o el fix no funciona |
+| 🔄 REGRESIÓN | Se intentó fixear pero introdujo otro problema |
+| ⏸️ DIFERIDO | Deuda aceptada documentada |
+| ❓ NO VERIFICABLE | No se puede verificar sin build/test/runtime |
+
+### PASO 4 — Buscar regresiones
+Si el fix tocó archivos, verificar que:
+- Los tests sigan pasando (`uv run pytest`)
+- No se hayan roto transiciones de estado
+- No se hayan introducido permisos incorrectos
+- No haya nuevas race conditions
+
+### PASO 5 — Generar reporte
+Tabla: hallazgo original | respuesta agente | estado real | evidencia
+
+## Red Lines
+
+```
+NO es una auditoría nueva — no buscar issues no relacionados con hallazgos previos
+NO marcar RESUELTO un fix cosmético si la causa raíz sigue abierta
+Toda conclusión debe tener evidencia verificable (diff, grep, lectura actual)
+Si el fix toca el protocolo MCP, contrastar contra docs del SDK
+```

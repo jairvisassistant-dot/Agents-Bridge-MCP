@@ -1,0 +1,80 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "🧪 Start SSE Server (headless)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_bridge",
+      "args": [
+        "start",
+        "--headless",
+        "--port", "8765",
+        "--db-path", "${workspaceFolder}/bridge-dev.db"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "🧪 Start SSE Server + TUI",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "agent_bridge",
+      "args": [
+        "start",
+        "--port", "8765",
+        "--db-path", "${workspaceFolder}/bridge-dev.db"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "▶️ Run VSCode Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/extensions/vscode"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/extensions/vscode/out/**/*.js"
+      ],
+      "preLaunchTask": "compile: vscode extension"
+    },
+    {
+      "name": "🔬 Tests (all)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "tests/",
+        "-v"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "🔬 Tests (current file)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": [
+        "${file}",
+        "-v"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    }
+  ]
+}

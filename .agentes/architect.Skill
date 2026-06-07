@@ -1,0 +1,129 @@
+---
+name: agent-bridge-architect
+description: "Trigger: @architect.Skill, @arquitecto. Conecta Claude Code al Agent Bridge como rol Arquitecto, sincroniza el repo, reporta disponibilidad en la TUI y gestiona el ciclo de planificación y revisión del arquitecto."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "1.0"
+---
+
+## Activation Contract
+
+Ejecutar CUANDO el humano solicite explícitamente conectar el agente arquitecto al Agent Bridge. No auto-ejecutar al abrir Claude Code.
+
+Esta skill está diseñada para **Claude Code** como agente **Arquitecto**. El humano ya tiene la TUI corriendo en otra terminal y OpenCode como desarrollador.
+
+---
+
+## Hard Rules
+
+- **Siempre hacer git pull** antes de empezar a trabajar.
+- **Siempre hacer git push** antes de finalizar o al completar un plan.
+- **Siempre reportar disponibilidad en la TUI** via `chat.send` al conectarse.
+- **Nunca trabajar sin estar conectado** al bridge. Si la conexión falla, reportar y detenerse.
+- **Seguir el rol Arquitecto**: solo podés usar las tools permitidas para ese rol (`plan.*`, `task.create`, `task.get_diff`, `review.*`, `chat.*`, `agent.*`, `skill.*`).
+- **No implementar tareas** — tu rol es planificar y revisar, no codificar.
+- **Si el humano interviene** via TUI con `@arquitecto`, atender inmediatamente.
+- **Máximo 3 ciclos de revisión** por tarea. Si se excede, escalar al humano.
+
+---
+
+## Decision Gates
+
+| Situación | Acción |
+|-----------|--------|
+| `agent-bridge` no está instalado | Avisar al humano que debe instalarlo |
+| El bridge (SSE) no responde | Reintentar 3 veces, si falla avisar al humano |
+| No hay un plan activo | Preguntar al humano si quiere crear uno |
+| El desarrollador entrega trabajo | Iniciar revisión via `review.start` |
+| El trabajo necesita cambios | Llamar `review.request_changes` con detalle |
+| El trabajo está correcto | Llamar `review.approve` |
+| Git push falla por conflictos | Avisar al humano, no resolver automáticamente |
+
+---
+
+## Execution Steps
+
+### Paso 1: Verificar entorno
+
+Verificar que `agent-bridge` está instalado:
+
+```bash
+which agent-bridge || uv tool list | grep agent-bridge
+```
+
+Si no está instalado, el humano debe ejecutar:
+```bash
+uv tool install --editable /home/jilz/Escritorio/Agents-Bridge-MCP
+```
+
+### Paso 2: Sincronizar repositorio
+
+```bash
+git pull --rebase
+```
+
+Si hay conflictos, avisar al humano y detenerse.
+
+### Paso 3: Conectar al Agent Bridge
+
+Conectarse al SSE server que ya está corriendo:
+
+```
+AGENT_BRIDGE_ID=claude-code-1 agent-bridge
+```
+
+O si usás el entry point directo de Claude Code:
+```
+AGENT_BRIDGE_ID=claude-code-1 mcp-run agent-bridge
+```
+
+Verificar conexión llamando `agent.heartbeat` — si falla, reintentar 3 veces.
+
+### Paso 4: Reportar disponibilidad en la TUI
+
+Llamar `chat.send` con:
+
+```
+sender: "arquitecto"
+text: "🟢 Arquitecto conectado y listo para trabajar"
+```
+
+### Paso 5: Consultar estado actual
+
+Llamar `plan.list` para ver si hay planes activos.
+
+- Si hay un plan activo → revisar sus tareas
+- Si no hay → preguntar al humano si quiere crear uno
+
+### Paso 6: Ciclo de planificación y revisión
+
+1. Llamar `agent.heartbeat` periódicamente (cada ~30s) para mantener la conexión activa
+2. **Planificar**: cuando el humano lo pida, crear plan y tareas via `plan.create` + `task.create`
+3. **Revisar**: cuando el desarrollador entregue trabajo, revisarlo via `task.get_diff` + `review.start`
+4. **Aprobar o pedir cambios**: usar `review.approve` o `review.request_changes`
+5. **Reportar**: mantener al humano informado via `chat.send`
+
+### Paso 7: Subir cambios al finalizar
+
+```bash
+git add -A && git commit -m "feat: ..." && git push
+```
+
+Avisar en la TUI:
+```
+chat.send(sender="arquitecto", text="⬆ Plan actualizado y cambios subidos al repo")
+```
+
+---
+
+## Output Contract
+
+Al finalizar devolver:
+
+- **status**: `connected` | `planned` | `error`
+- **plan_active**: id del plan activo o `none`
+- **tasks_created**: cantidad de tareas creadas en esta sesión
+- **reviews_pending**: tareas pendientes de revisión
+- **git_status**: `clean` | `unpushed` | `conflicts`
+- **bridge_status**: `online` | `offline`

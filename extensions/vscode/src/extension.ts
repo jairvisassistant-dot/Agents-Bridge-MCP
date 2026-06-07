@@ -20,14 +20,17 @@ import { MCPClient } from "./mcpClient";
 import { AgentTreeProvider } from "./agentProvider";
 import { KanbanTreeProvider } from "./kanbanProvider";
 import { ChatWebviewProvider } from "./chatWebview";
+import { AgentDashboardProvider } from "./agentDashboard";
 import { TerminalManager } from "./terminalManager";
 import { BridgeStatusBar } from "./statusBar";
 import { CommandRegistry } from "./commands";
 import type {
   ConnectionState,
+  HealthStatus,
   AgentInfo,
   PlanInfo,
   TaskInfo,
+  DashboardData,
 } from "./types";
 
 // ── Activation ────────────────────────────────────────────────────
@@ -37,6 +40,7 @@ let statusBar: BridgeStatusBar;
 let agentProvider: AgentTreeProvider;
 let kanbanProvider: KanbanTreeProvider;
 let chatProvider: ChatWebviewProvider;
+let dashboardProvider: AgentDashboardProvider;
 let sidecar: SidecarManager;
 let mcpClient: MCPClient;
 let terminalManager: TerminalManager;
@@ -76,9 +80,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Sidecar (Python process) ─────────────────────────────────
   const bundledPath = resolveBundledPath(context);
-  sidecar = new SidecarManager(config.port, (state: ConnectionState) => {
-    refreshAll(state);
-  }, bundledPath);
+  sidecar = new SidecarManager(
+    config.port,
+    (state: ConnectionState) => {
+      refreshAll(state);
+    },
+    (_health: HealthStatus) => {
+      refreshStatusBar();
+    },
+    bundledPath,
+  );
 
   // ── MCP Client ───────────────────────────────────────────────
   mcpClient = new MCPClient(
@@ -134,6 +145,40 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  // ── Dashboard webview ─────────────────────────────────────────
+  dashboardProvider = new AgentDashboardProvider(
+    context.extensionUri,
+    (command: string, args?: Record<string, string>) => {
+      switch (command) {
+        case "focus-terminal":
+          if (args?.agentId) terminalManager?.showTerminal(args.agentId);
+          break;
+        case "disconnect-agent":
+          if (args?.agentId) terminalManager?.disconnectAgent(args.agentId);
+          refreshAll(sidecar.getState() as ConnectionState);
+          break;
+        case "open-chat":
+          vscode.commands.executeCommand("agent-bridge.chat.focus");
+          break;
+        case "start-bridge":
+          vscode.commands.executeCommand("agent-bridge.start");
+          break;
+        case "restart-bridge":
+          vscode.commands.executeCommand("agent-bridge.restart");
+          break;
+      }
+    },
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "agent-bridge.showDashboard",
+      () => {
+        dashboardProvider.show();
+      },
+    ),
+  );
+
   // ── Terminal manager ─────────────────────────────────────────
   terminalManager = new TerminalManager(
     config.port,
@@ -149,6 +194,7 @@ export function activate(context: vscode.ExtensionContext): void {
       "agent-bridge.showMenu",
       async () => {
         const pick = await vscode.window.showQuickPick([
+          { label: "$(dashboard) Dashboard", id: "agent-bridge.showDashboard" },
           { label: "$(comment-discussion) Open Chat", id: "agent-bridge.openChat" },
           { label: "$(plug) Connect Agent", id: "agent-bridge.connectAgent" },
           { label: "$(terminal) New Terminal", id: "agent-bridge.newTerminal" },
@@ -206,6 +252,7 @@ export function deactivate(): void {
   mcpClient?.disconnect().catch(() => {});
   sidecar?.stop().catch(() => {});
   chatProvider?.dispose();
+  dashboardProvider?.dispose();
   statusBar?.dispose();
 
   console.log("[agent-bridge] Extension deactivated");
@@ -232,6 +279,14 @@ function stopPolling(): void {
 // Keep track of the latest agent count for the status bar
 let _lastAgentCount = 0;
 
+// Track pending mentions for badge and desktop notification (Feature 4)
+let _lastMentionCount = 0;
+let _lastPendingCount = 0;
+
+// Track roles that were already polled in this poll cycle to avoid duplicate
+// terminal.get_pending calls.
+let _terminalRolesPolled = new Set<string>();
+
 async function refreshAll(state: ConnectionState): Promise<void> {
   try {
     if (state === "connected" && mcpClient.connected) {
@@ -248,6 +303,67 @@ async function refreshAll(state: ConnectionState): Promise<void> {
       agentProvider.refresh(agents, state);
       kanbanProvider.refresh(plans, tasks);
       chatProvider.postAgents(agents);
+
+      // ── Update dashboard data ─────────────────────────────────
+      const dashData: DashboardData = {
+        agents,
+        connectionState: state,
+        health: sidecar.getHealthStatus(),
+        terminalCount: terminalManager?.getConnectedCount() ?? 0,
+        pid: sidecar.pid,
+      };
+      dashboardProvider?.update(dashData);
+
+      // ── Update terminal roles & deliver cross-terminal messages ──
+      _terminalRolesPolled.clear();
+      for (const agent of agents) {
+        terminalManager?.setAgentRole(agent.id, agent.role);
+      }
+
+      // Check for pending terminal messages per role (Feature 2)
+      const roleSet = new Set(agents.map((a) => a.role));
+      for (const role of roleSet) {
+        if (_terminalRolesPolled.has(role)) continue;
+        _terminalRolesPolled.add(role);
+
+        try {
+          const messages = await mcpClient.getPendingTerminalMessages(role);
+          if (messages.length > 0) {
+            const targets = terminalManager?.getAgentIdsByRole(role) ?? [];
+            for (const msg of messages) {
+              for (const targetId of targets) {
+                terminalManager?.notifyTerminal(targetId, msg.sender, msg.text);
+              }
+              // Desktop notification for the human (once per message)
+              if (targets.length > 0) {
+                vscode.window.showInformationMessage(
+                  `📩 ${msg.sender} → ${role}: ${msg.text.substring(0, 80)}`,
+                );
+              }
+            }
+            console.log(
+              `[agent-bridge] Delivered ${messages.length} terminal message(s) for role '${role}'`,
+            );
+          }
+        } catch (err) {
+          console.warn(`[agent-bridge] Terminal message poll error for '${role}':`, err);
+        }
+      }
+
+      // ── Pending mentions badge + desktop notification (Feature 4) ──
+      try {
+        const counts = await mcpClient.getPendingCounts();
+        if (counts.pendingMentions > _lastMentionCount) {
+          const newMentions = counts.pendingMentions - _lastMentionCount;
+          vscode.window.showInformationMessage(
+            `📨 ${newMentions} new mention${newMentions > 1 ? 's' : ''} pending`,
+          );
+        }
+        _lastMentionCount = counts.pendingMentions;
+        _lastPendingCount = counts.pendingMentions + counts.pendingTerminalMessages;
+      } catch (err) {
+        console.warn("[agent-bridge] Pending counts poll error:", err);
+      }
     } else {
       // Clear reconnecting flag only on terminal states (disconnected or
       // error), not during connecting or when the sidecar is still up but
@@ -256,8 +372,17 @@ async function refreshAll(state: ConnectionState): Promise<void> {
         isReconnecting = false;
       }
       _lastAgentCount = 0;
+      _lastMentionCount = 0;
+      _lastPendingCount = 0;
       agentProvider.refresh([], state);
       kanbanProvider.refresh([], []);
+      dashboardProvider?.update({
+        agents: [],
+        connectionState: state,
+        health: sidecar.getHealthStatus(),
+        terminalCount: 0,
+        pid: sidecar.pid,
+      });
     }
   } catch (err) {
     console.warn("[agent-bridge] Refresh error:", err);
@@ -270,13 +395,14 @@ function refreshStatusBar(): void {
   // If MCPClient is actively reconnecting, show that instead of the
   // sidecar state (the process may be up but the SSE stream is down).
   if (isReconnecting) {
-    statusBar.update("reconnecting", _lastAgentCount, terminalManager?.getConnectedCount() ?? 0);
+    statusBar.update("reconnecting", _lastAgentCount, terminalManager?.getConnectedCount() ?? 0, undefined, _lastPendingCount);
     return;
   }
 
   const state = sidecar.getState() as ConnectionState;
+  const health = sidecar.getHealthStatus();
   const terminalCount = terminalManager?.getConnectedCount() ?? 0;
-  statusBar.update(state, _lastAgentCount, terminalCount);
+  statusBar.update(state, _lastAgentCount, terminalCount, health, _lastPendingCount);
 }
 
 async function refreshChat(): Promise<void> {

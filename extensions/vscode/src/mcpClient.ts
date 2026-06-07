@@ -228,6 +228,24 @@ export class MCPClient {
     return this.parseContent<AgentInfo[]>(result) ?? [];
   }
 
+  /**
+   * Fetch counts of pending mentions and terminal messages (for badges).
+   */
+  async getPendingCounts(): Promise<{
+    pendingMentions: number;
+    pendingTerminalMessages: number;
+  }> {
+    const result = await this.callTool("agent.get_pending_counts");
+    const parsed = this.parseContent<{
+      pending_mentions: number;
+      pending_terminal_messages: number;
+    }>(result);
+    return {
+      pendingMentions: parsed?.pending_mentions ?? 0,
+      pendingTerminalMessages: parsed?.pending_terminal_messages ?? 0,
+    };
+  }
+
   // ── Plan operations ────────────────────────────────────────────────
 
   /**
@@ -334,6 +352,32 @@ export class MCPClient {
     if (threadId !== undefined) args.thread_id = threadId;
 
     await this.callTool("chat.send", args);
+  }
+
+  // ── Terminal message operations (Feature 2) ─────────────────────────
+
+  /**
+   * Fetch and deliver pending terminal messages for a given role.
+   *
+   * Messages are atomically marked as delivered server-side. Returns an
+   * array of { id, sender, text, created_at } objects, empty when none.
+   */
+  async getPendingTerminalMessages(role: string): Promise<
+    Array<{ id: string; sender: string; text: string; created_at: string }>
+  > {
+    const result = await this.callTool("terminal.get_pending", {
+      target_role: role,
+    });
+    const parsed = this.parseContent<{
+      status: string;
+      messages: Array<{
+        id: string;
+        sender: string;
+        text: string;
+        created_at: string;
+      }>;
+    }>(result);
+    return parsed?.messages ?? [];
   }
 
   // ── JSON-RPC transport ─────────────────────────────────────────────

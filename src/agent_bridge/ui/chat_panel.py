@@ -1,13 +1,13 @@
 """ChatPanel — persistent chat widget for the Kanban TUI.
 
-Unifies chat_tui.py features (status bar, agent indicators, @mentions,
-/commands, F1 help) with contextual task awareness into a single Widget
-that lives at the bottom of the kanban layout.
+Provides status bar, agent indicators, @mentions, /commands, F1 help,
+and contextual task awareness in a single Widget that lives at the
+bottom of the kanban layout.
 
 Uses TuiBridge (direct DB) — no MCP subprocess.
 
-Note: ChatOverlay (legacy modal chat) was removed in NEW-04 — ChatPanel
-is the only chat widget.
+Note: ChatOverlay (legacy modal chat) and the standalone chat_tui.py
+were removed — ChatPanel is the only chat widget.
 """
 
 from __future__ import annotations

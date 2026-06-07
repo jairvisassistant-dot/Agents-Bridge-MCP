@@ -1,0 +1,108 @@
+---
+name: software-architecture-auditor
+description: "Trigger: auditar arquitectura, revisar stack, evaluar diseño MCP, performance, concurrencia. Auditoría de arquitectura del MCP Broker: diseño de tools, state machine, permisos, transporte, y stack tecnológico."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "2.0"
+---
+
+## When to Use
+
+- Solicitud de "auditar arquitectura" o "revisar el stack"
+- Análisis de "diseño MCP" o "protocolo"
+- Evaluación de decisiones técnicas (transporte, persistencia, roles)
+- Revisión de seguridad a nivel arquitectural (permisos, aislamiento)
+- Evaluación de deuda técnica arquitectural
+
+## Exclusiones (NO auditar)
+
+```
+.venv/ → excluir | __pycache__/ → excluir | *.pyc → excluir
+.git/ → excluir | *.db → excluir | node_modules/ → excluir
+```
+
+## Input Contract
+
+| Contexto | Fuente |
+|---|---|
+| Código fuente | `src/agent_bridge/` completo |
+| Hallazgos de code audit | `audits/audit_code_*.json` (el más reciente) |
+| Artefactos previos | `audits/audit_architecture_*.md` |
+| Modo ejecución | `pipeline` (vía orquestador) o `standalone` |
+
+## Output Contract
+
+Al finalizar, escribir en `audits/`:
+- `audit_architecture_YYYYMMDD_HHMM.md` — Reporte legible para humanos
+- `audit_architecture_YYYYMMDD_HHMM.json` — Hallazgos estructurados
+
+## Methodology
+
+### PASO 1 — Inventario Tecnológico
+Evaluar cada dependencia en `pyproject.toml`:
+- `mcp>=1.6.0` — ¿versión correcta? ¿API estable? ¿alternativas?
+- `aiosqlite>=0.20.0` — ¿WAL mode? ¿concurrencia? ¿pooling?
+- `textual>=1.0.0` — ¿widgets adecuados? ¿rendimiento del TUI?
+- `httpx>=0.28.0` — ¿necesario? ¿o se puede usar stdlib?
+- `uv_build` — ¿build system adecuado?
+
+### PASO 2 — Diseño del Protocolo MCP
+- ¿Los tool names siguen la convención `dominio.accion`?
+- ¿Los `inputSchema` tienen tipos correctos y `required` bien definidos?
+- ¿Los errores se devuelven como `TextContent` estructurado o como excepciones?
+- ¿Hay tools que deberían ser resources (`Resource` en vez de `Tool`)?
+- ¿El transporte SSE vs stdio está correctamente implementado?
+
+### PASO 3 — State Machine y Transiciones
+- ¿Todos los estados posibles están cubiertos?
+- ¿Las transiciones inválidas devuelven error claro?
+- ¿Hay estados huérfanos (sin transición de salida)?
+- ¿Las transiciones concurrentes son seguras?
+- `Plan: idle → planning → tasks_ready → in_progress → completed`
+- `Task: pending → in_progress → review → approved / changes_requested`
+- `Thread: open → resolved`
+
+### PASO 4 — Modelo de Permisos
+- ¿Cada tool tiene el rol correcto asignado?
+- ¿El fallback a `default` es seguro?
+- ¿Hay tools que deberían tener restricciones adicionales?
+- ¿Se valida el rol en cada llamada o hay atajos?
+- ¿Hay riesgos de privilege escalation entre roles?
+
+### PASO 5 — Concurrencia y Aislamiento
+- SQLite WAL mode: ¿las transacciones usan `BEGIN IMMEDIATE`?
+- ¿Hay deadlocks potenciales entre tools concurrentes?
+- ¿El `_maintenance_loop` compite con tools del agente?
+- ¿Hay riesgo de starvation para un agente?
+- ¿El reassign de tareas es atómico?
+
+### PASO 6 — Persistencia y Schema
+- Schema SQL: ¿migraciones hacia adelante? ¿rollback?
+- ¿Los índices cubren las queries críticas?
+- ¿Hay campos sin usar o columnas obsoletas?
+- ¿El schema soporta la evolución esperada (skills custom, múltiples planes)?
+
+### PASO 7 — Testing y Cobertura Arquitectural
+- ¿Hay tests de integración MCP real (stdio cycle)?
+- ¿Los tests de permisos cubren todos los roles y tools?
+- ¿Hay tests de migración de schema?
+- ¿Los tests de estrés cubren concurrencia real?
+
+## Red Lines
+
+```
+NO repetir hallazgos de código (bugs, async, SQL injection)
+NO sugerir cambios cosméticos sin resolver issues CRIT/HIGH
+NO commit automático del reporte
+```
+
+## Categorías de Hallazgo
+
+| Severidad | Significado |
+|-----------|-------------|
+| CRITICAL | Vulnerabilidad arquitectural, pérdida de datos, violación de aislamiento |
+| HIGH | Race condition no cubierta, permiso incorrecto, transición inválida |
+| MEDIUM | Mala práctica de diseño, falta de test arquitectural |
+| LOW | Convención menor, naming, documentación |
+| INFO | Observación, mejora sugerida |

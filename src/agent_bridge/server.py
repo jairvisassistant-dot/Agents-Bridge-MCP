@@ -18,6 +18,7 @@ from agent_bridge.tools.planner import PLAN_TOOLS, handle_plan_tool
 from agent_bridge.tools.review import REVIEW_TOOLS, handle_review_tool
 from agent_bridge.tools.skills import SKILL_TOOLS, handle_skill_tool
 from agent_bridge.tools.tasks import TASK_TOOLS, handle_task_tool
+from agent_bridge.tools.terminal import TERMINAL_TOOLS, handle_terminal_tool
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ ALL_TOOLS: list[types.Tool] = [
     *CHAT_TOOLS,
     *AGENT_TOOLS,
     *SKILL_TOOLS,
+    *TERMINAL_TOOLS,
 ]
 
 
@@ -277,6 +279,12 @@ def create_server(
             # Agent presence tools
             if tool_prefix == "agent":
                 result = await handle_agent_tool(db, config, name, args)
+                if result is not None:
+                    return result
+
+            # Cross-terminal notification tools
+            if tool_prefix == "terminal":
+                result = await handle_terminal_tool(db, config, name, args)
                 if result is not None:
                     return result
 

@@ -160,6 +160,11 @@ AGENT_TOOLS = [
             "required": ["target_agent_id"],
         },
     ),
+    types.Tool(
+        name="agent.get_pending_counts",
+        description="Get counts of pending mentions and terminal messages (for UI badges).",
+        inputSchema={"type": "object", "properties": {}},
+    ),
 ]
 
 
@@ -186,6 +191,8 @@ async def handle_agent_tool(
         return await _shutdown_request(db, args)
     elif name == "agent.shutdown_approve":
         return await _shutdown_approve(db, args)
+    elif name == "agent.get_pending_counts":
+        return await _get_pending_counts(db)
     return None
 
 
@@ -599,6 +606,21 @@ async def _shutdown_approve(db: Database, args: dict) -> list[types.TextContent]
                 "status": "shutdown_approved",
                 "approved_by": sender_id,
                 "notified": target_agent_id,
+            }),
+        )
+    ]
+
+
+async def _get_pending_counts(db: Database) -> list[types.TextContent]:
+    """Return counts of undelivered mentions and terminal messages."""
+    mention_count = await db.count_pending_mentions()
+    terminal_count = await db.count_pending_terminal_messages()
+    return [
+        types.TextContent(
+            type="text",
+            text=json.dumps({
+                "pending_mentions": mention_count,
+                "pending_terminal_messages": terminal_count,
             }),
         )
     ]

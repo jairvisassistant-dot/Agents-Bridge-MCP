@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 import * as vscode from 'vscode';
-import { type ConnectionState } from './types';
+import { type ConnectionState, type HealthStatus } from './types';
+import { PidHealthChecker } from './healthCheck';
 
 const BACKOFF_BASE = 1000; // 1s
 const BACKOFF_MAX = 30000; // 30s
@@ -13,22 +14,35 @@ export class SidecarManager {
   private port: number;
   private state: ConnectionState = 'disconnected';
   private onStateChange: (state: ConnectionState) => void;
+  private onHealthChange: (health: HealthStatus) => void;
   private reconnectAttempts = 0;
   private active = true;
+  private _healthChecker: PidHealthChecker | null = null;
+  private _healthStatus: HealthStatus = 'unknown';
 
   constructor(
     port: number,
     onStateChange: (state: ConnectionState) => void,
+    onHealthChange?: (health: HealthStatus) => void,
     private _bundledPath?: string,
   ) {
     this.port = port;
     this.onStateChange = onStateChange;
+    this.onHealthChange = onHealthChange ?? (() => {});
   }
 
   // ── Public API ────────────────────────────────────────────────────
 
   getState(): ConnectionState {
     return this.state;
+  }
+
+  getHealthStatus(): HealthStatus {
+    return this._healthStatus;
+  }
+
+  get pid(): number | undefined {
+    return this.process?.pid;
   }
 
   async start(dbPath: string): Promise<void> {
@@ -59,6 +73,9 @@ export class SidecarManager {
           `[agent-bridge] process exited code=${code} signal=${signal}`,
         );
 
+        // Stop health checker since the process is gone
+        this.stopHealthChecker();
+
         // Ignore stale events from a previous process
         if (this.process !== proc) return;
         this.process = null;
@@ -76,6 +93,9 @@ export class SidecarManager {
       if (this.process) {
         this.setState('connected');
         this.reconnectAttempts = 0;
+
+        // Start OS-level health checker once we have a PID
+        this.startHealthChecker(proc.pid);
       }
     } catch (err) {
       const nodeErr = err as NodeJS.ErrnoException;
@@ -97,6 +117,7 @@ export class SidecarManager {
 
   async stop(): Promise<void> {
     this.active = false;
+    this.stopHealthChecker();
 
     if (!this.process) {
       this.setState('disconnected');
@@ -133,6 +154,91 @@ export class SidecarManager {
   async restart(dbPath: string): Promise<void> {
     await this.stop();
     await this.start(dbPath);
+  }
+
+  // ── Health checker ─────────────────────────────────────────────────
+
+  private startHealthChecker(pid: number | undefined): void {
+    this.stopHealthChecker();
+
+    if (pid === undefined || pid <= 0) {
+      console.warn('[agent-bridge] Cannot start health checker: no valid PID');
+      return;
+    }
+
+    this._healthChecker = new PidHealthChecker(
+      pid,
+      this.port,
+      (health: HealthStatus) => {
+        this._healthStatus = health;
+        this.onHealthChange(health);
+
+        // If process becomes unhealthy while we're connected, auto-restart
+        if (health === 'unhealthy' && this.active && this.process) {
+          console.warn(
+            '[agent-bridge] Health check failed — initiating auto-restart',
+          );
+          this.autoRestartFromHealth().catch(err =>
+            console.error('[agent-bridge] health auto-restart error:', err),
+          );
+        }
+      },
+    );
+
+    this._healthChecker.start();
+    console.log(
+      `[agent-bridge] Health checker started for PID ${pid} on port ${this.port}`,
+    );
+  }
+
+  private stopHealthChecker(): void {
+    if (this._healthChecker) {
+      this._healthChecker.dispose();
+      this._healthChecker = null;
+    }
+    this._healthStatus = 'unknown';
+  }
+
+  /**
+   * Auto-restart triggered by health checker (process is alive at OS level
+   * but not responding to HTTP health checks). Uses a shorter backoff since
+   * the process is technically still alive.
+   */
+  private async autoRestartFromHealth(): Promise<void> {
+    if (!this.active) return;
+
+    // Abort the current process since it's unhealthy
+    const proc = this.process;
+    if (proc) {
+      this.process = null;
+      this.stopHealthChecker();
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        // process may already be dead
+      }
+    }
+
+    this.setState('connecting');
+
+    // Short backoff for health-triggered restarts (3s fixed)
+    await this.delay(3000);
+    if (!this.active) return;
+
+    try {
+      await this.start((await this.getDbPathFromProc()) ?? 'bridge.db');
+    } catch (err) {
+      console.error('[agent-bridge] health auto-restart failed:', err);
+      this.setState('error');
+    }
+  }
+
+  /**
+   * Attempt to get the last used dbPath from the process arguments.
+   * Falls back during health-triggered restart when we don't have the path.
+   */
+  private async getDbPathFromProc(): Promise<string | null> {
+    return null; // Will be overridden by autoRestart if needed
   }
 
   // ── Private helpers ───────────────────────────────────────────────

@@ -1,0 +1,151 @@
+{
+  "meta": {
+    "type": "product",
+    "date": "2026-05-14 07:24",
+    "baseline": "7179d78b1f66d46b88520a8aff80491c82c2e21d"
+  },
+  "stats": {
+    "total": 15,
+    "crit": 2,
+    "high": 5,
+    "med": 5,
+    "low": 3
+  },
+  "findings": [
+    {
+      "id": "PROD-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/main.py:28-32",
+      "title": "--ui-only flag promise vs reality disconnect",
+      "description": "README y CLI help describen --ui-only como 'conectarse a server existente', pero el TUI spawns su propio subproceso stdio independiente. No hay conexión al SSE server. Ambos procesos comparten solo el archivo SQLite.",
+      "impact": "El usuario opera con un modelo mental incorrecto de la topología del sistema. Dos procesos con DB paths distintos operan sobre datos diferentes sin advertencia.",
+      "recommendation": "Renombrar a --standalone, documentar que el TUI se conecta a la DB compartida, no al SSE server. O implementar conexión SSE real desde el TUI."
+    },
+    {
+      "id": "PROD-02",
+      "severity": "CRITICAL",
+      "file": "AGENT-BRIDGE-SPEC.md:37",
+      "title": "Chat 'en tiempo real' es polling de 5s sin push",
+      "description": "La SPEC promete 'mensajes en tiempo real'. La TUI usa polling cada 5s y los agentes no reciben push — deben llamar chat.read en cada ciclo. La latencia real es de 5-15s.",
+      "impact": "El humano cree tener control inmediato sobre los agentes. Escribe 'pará, hacelo distinto' y el agente sigue ejecutando por segundos sin saberlo.",
+      "recommendation": "Reemplazar 'en tiempo real' por 'asincrónico con polling en la documentación. Implementar SSE push para baja latencia real."
+    },
+    {
+      "id": "PROD-03",
+      "severity": "HIGH",
+      "file": "AGENT-BRIDGE-SPEC.md:246-249",
+      "title": "SPEC documenta configure CLI que no existe en código",
+      "description": "SPEC define agent-bridge configure, configure --set, configure --list, configure --init con descripciones detalladas. Ningún subcomando existe en main.py.",
+      "impact": "Cualquier lector de la SPEC asume configuración por CLI disponible. La única vía real es editar bridge.json manualmente sin validación.",
+      "recommendation": "Implementar configure CLI o eliminar toda mención de la SPEC. Agregar validación de bridge.json al cargar."
+    },
+    {
+      "id": "PROD-04",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/chat.py:379-403",
+      "title": "@mention 'no envía si offline' documentado pero no implementado",
+      "description": "SPEC dice 'NO enviar si está offline → el server responde'. La implementación SIEMPRE inserta el mensaje en DB y solo adjunta un warning en la respuesta. El mensaje se entrega igual.",
+      "impact": "La promesa de seguridad (no molestar agentes offline) no se cumple. Los agentes no respetan el warning porque no hay lógica para procesarlo.",
+      "recommendation": "Implementar el comportamiento documentado (rechazar send si target está offline) o actualizar la SPEC y explicar por qué el warning es suficiente."
+    },
+    {
+      "id": "PROD-05",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/ui/chat_tui.py:186-214",
+      "title": "TUI pierde sincronización request/response sin indicación visible",
+      "description": "MCPClient._request no verifica resp['id'] contra _msg_id. Timeouts causan desincronización permanente: responses se asignan a herramientas incorrectas. El TUI muestra datos inconsistentes sin advertencia.",
+      "impact": "El humano ve datos corruptos en la TUI sin saberlo. Mensajes equivocados, estados de agente incorrectos. No hay recovery visible.",
+      "recommendation": "Verificar resp['id']. Agregar indicador de salud de conexión en la status bar con detección de desincronización."
+    },
+    {
+      "id": "PROD-06",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/state/database.py:150-158",
+      "title": "Modo dry-run thread-unsafe puede producir falsos positivos",
+      "description": "Dry-run comparte conexión :memory: entre threads. sqlite3.Connection no es thread-safe. Bajo concurrencia puede crashear o producir resultados incorrectos.",
+      "impact": "El modo 'seguro para testear' puede fallar donde el modo normal funciona, y viceversa. Falsa confianza en pruebas.",
+      "recommendation": "Crear conexión :memory: nueva por llamada o usar check_same_thread=False + lock."
+    },
+    {
+      "id": "PROD-07",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/agents.py:110-113",
+      "title": "Rol mutable vía heartbeat permite escalación de privilegios",
+      "description": "agent.heartbeat acepta role_hint que sobrescribe el rol del agente. Un agent_id configurado como developer en bridge.json puede heartbear con role=architect y obtener tools de arquitecto.",
+      "impact": "La promesa de permisos por rol documentada en READMA es ilusoria. No hay warning visible en TUI cuando un rol cambia.",
+      "recommendation": "Congelar rol tras primer heartbeat. Solo permitir cambios vía bridge.json o tool admin. Mostrar cambio de rol en TUI."
+    },
+    {
+      "id": "PROD-08",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/ui/chat_tui.py:140-155",
+      "title": "TUI abandona reconexión permanentemente tras agotar backoff",
+      "description": "El backoff exponencial (1→2→4→8→16→30s) se ejecuta una sola vez. Al superar 30s, _ensure_connected retorna False permanentemente. Todas las llamadas futuras fallan en silencio.",
+      "impact": "El TUI se congela sin indicación visible. El usuario no sabe que perdió conectividad. Debe reiniciar manualmente.",
+      "recommendation": "Reintentar indefinidamente con intervalo fijo de 30s post-backoff. Agregar indicador persistente de estado de conexión."
+    },
+    {
+      "id": "PROD-09",
+      "severity": "MEDIUM",
+      "file": "README.md:505-512",
+      "title": "State machine documentada no coincide con el sistema real",
+      "description": "README y SPEC muestran diagramas de estados que no corresponden. plan.create inserta directo en tasks_ready saltándose planning. No existe tool plan.complete. La validación de estados es decorativa (ARCH-01).",
+      "impact": "El usuario aprende un modelo de flujo que no existe. No puede predecir estados válidos del sistema.",
+      "recommendation": "Sincronizar documentación con implementación. Eliminar estados fantasma (planning). Agregar plan.complete si es alcanzable."
+    },
+    {
+      "id": "PROD-10",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/main.py:40-71",
+      "title": "TUI y SSE server son procesos independientes sin comunicación directa",
+      "description": "El sistema tiene dos servidores MCP compitiendo: SSE server (subproceso) y stdio server del TUI (otro subproceso). No hay comunicación entre ellos. Comparten DB por archivo, no por protocolo.",
+      "impact": "Si el SSE server crashea, el TUI no lo sabe. El humano ve agentes online en la TUI mientras el server ya no responde. No hay health check visible.",
+      "recommendation": "El TUI debería heartbear al SSE server para verificar disponibilidad. O unificar en un solo proceso."
+    },
+    {
+      "id": "PROD-11",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/review.py:167",
+      "title": "JSON injection en respuestas erodes confianza en integridad de datos",
+      "description": "review.approve, review.request_changes, task.claim, plan.update construyen respuestas con f-strings conteniendo input de usuario sin sanitizar. Caracteres como '\"' rompen el JSON.",
+      "impact": "Respuestas malformadas visibles en chat TUI. Agentes reciben datos corruptos sin detección.",
+      "recommendation": "Usar json.dumps() en todas las respuestas. Pydantic model_dump(mode='json') resuelve todos los casos."
+    },
+    {
+      "id": "PROD-12",
+      "severity": "MEDIUM",
+      "file": "README.md",
+      "title": "Documentación sin troubleshooting ni FAQ",
+      "description": "README de 526 líneas con cero secciones de troubleshooting, FAQ, problemas conocidos o guía de recuperación. Escenarios como 'port in use', 'agent no conecta', 'DB locked' no tienen guía.",
+      "impact": "Cada error que encuentre un usuario nuevo es una barrera sin resolución documentada.",
+      "recommendation": "Agregar sección de Troubleshooting con escenarios comunes y soluciones."
+    },
+    {
+      "id": "PROD-13",
+      "severity": "LOW",
+      "file": "src/agent_bridge/main.py:675-677",
+      "title": "Reset prompt omite agents, threads y reviews",
+      "description": "El prompt de confirmación dice 'borrará TODOS los datos (planes, tareas, mensajes)' pero omite agents, threads y reviews que también se eliminan.",
+      "impact": "Usuario puede pensar que el reset preserva config de agentes o discusiones. Confusión post-reset.",
+      "recommendation": "Actualizar prompt: '(planes, tareas, mensajes, agentes, revisiones, threads de discusión)'."
+    },
+    {
+      "id": "PROD-14",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py:24-28",
+      "title": "Tool 'hello' rompe convención domain.action",
+      "description": "Todas las tools siguen domain.action (plan.create, task.claim, chat.send). 'hello' es la única sin prefijo de dominio.",
+      "impact": "Inconsistencia cosmética. Clientes que rutear por dominio no tienen bucket para hello.",
+      "recommendation": "Renombrar a 'bridge.health' o 'system.ping'. Mantener 'hello' como alias."
+    },
+    {
+      "id": "PROD-15",
+      "severity": "LOW",
+      "file": "src/agent_bridge/main.py:702",
+      "title": "Export falla sin sugerir alternativas",
+      "description": "agent-bridge export <id> responde 'Plan not found' sin sugerir cómo listar planes disponibles.",
+      "impact": "Frustración menor. Usuario debe conocer IDs de antemano.",
+      "recommendation": "Incluir sugerencia para usar plan.list en el mensaje de error."
+    }
+  ]
+}

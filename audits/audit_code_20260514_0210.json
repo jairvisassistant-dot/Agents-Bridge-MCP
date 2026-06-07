@@ -1,0 +1,187 @@
+{
+  "meta": {
+    "type": "code",
+    "date": "2026-05-14 02:10",
+    "baseline": "7179d78b1f66d46b88520a8aff80491c82c2e21d"
+  },
+  "stats": {
+    "total": 18,
+    "crit": 1,
+    "high": 6,
+    "med": 5,
+    "low": 4,
+    "info": 2
+  },
+  "findings": [
+    {
+      "id": "CODE-01",
+      "severity": "CRITICAL",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 153,
+      "title": "Dry-run mode comparte conexión SQLite entre threads",
+      "description": "En dry-run, _memory_conn se comparte entre TODAS las llamadas anyio.to_thread.run_sync. sqlite3.Connection NO es thread-safe. Múltiples threads ejecutando SQL simultáneamente en la misma conexión causa crashes y corrupción de estado.",
+      "impact": "Race condition determinística en dry-run bajo concurrencia. Crashes intermitentes o datos incorrectos.",
+      "recommendation": "Crear una nueva conexión :memory: por llamada (como modo normal), o usar check_same_thread=False + lock thread-safe."
+    },
+    {
+      "id": "CODE-02",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 167,
+      "title": "Race condition en startup con múltiples conexiones SSE concurrentes",
+      "description": "init_db() se llama por cada conexión SSE (server.py:104). Dos conexiones simultáneas en DB fresh ven schema_version=0 y AMBAS ejecutan migraciones. ALTER TABLE ADD COLUMN no es idempotente — la segunda falla con 'duplicate column'.",
+      "impact": "La segunda conexión SSE falla con excepción, desconectando al cliente.",
+      "recommendation": "Usar BEGIN IMMEDIATE + INSERT OR IGNORE para schema_version como lock de startup, o mover migraciones a singleton fuera del handler SSE."
+    },
+    {
+      "id": "CODE-03",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/review.py",
+      "line": 167,
+      "title": "JSON injection en review.approve vía comment",
+      "description": "f'...\"comment\": \"{comment}\"...' — comment es input del usuario sin sanitizar. Caracteres como '\"' rompen el JSON y permiten inyectar campos falsos.",
+      "impact": "Permite inyectar campos JSON arbitrarios en la respuesta de la herramienta.",
+      "recommendation": "Usar json.dumps() en lugar de f-strings para respuestas con datos de usuario."
+    },
+    {
+      "id": "CODE-04",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/tasks.py",
+      "line": 215,
+      "title": "JSON injection en task.claim vía agent",
+      "description": "f'...\"assignee\": \"{agent}\"...' — agent viene de args.get('agent', 'developer') sin sanitizar.",
+      "impact": "Permite inyectar campos JSON arbitrarios en la respuesta.",
+      "recommendation": "Usar json.dumps()."
+    },
+    {
+      "id": "CODE-05",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 191,
+      "title": "JSON injection en plan.update vía status",
+      "description": "f'...\"status\": \"{target_status}\"...' — target_status es args.get('status') sin sanitizar. Mismo patrón en _get_plan (línea 141) con title de la DB.",
+      "impact": "JSON injection en respuesta de plan.update y plan.get.",
+      "recommendation": "Usar json.dumps() en todas las respuestas."
+    },
+    {
+      "id": "CODE-06",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/review.py",
+      "line": 131,
+      "title": "Review approve no atómico: task UPDATE y review INSERT separados",
+      "description": "execute_write para UPDATE task + execute separado para UPDATE review en conexiones diferentes. Si el proceso crashea entre ambos, el estado queda inconsistente: task='approved' pero review='in_review'.",
+      "impact": "Inconsistencia de datos: tarea aprobada sin registro de revisión.",
+      "recommendation": "Envolver ambas operaciones en db.with_transaction()."
+    },
+    {
+      "id": "CODE-07",
+      "severity": "HIGH",
+      "file": "src/agent_bridge/tools/review.py",
+      "line": 188,
+      "title": "Review request_changes no atómico (mismo patrón que CODE-06)",
+      "description": "execute_write para UPDATE task + execute separado para UPDATE review. Misma inconsistencia potencial que CODE-06.",
+      "impact": "Inconsistencia de datos: task='changes_requested' pero review='in_review'.",
+      "recommendation": "Envolver ambas operaciones en db.with_transaction()."
+    },
+    {
+      "id": "CODE-08",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/server.py",
+      "line": 280,
+      "title": "asyncio.create_task no tracked para maintenance loop",
+      "description": "La tarea del maintenance loop se crea fire-and-forget sin referencia almacenada. No se cancela en shutdown. Mezcla asyncio.create_task con ecosistema anyio.",
+      "impact": "Tarea huérfana en shutdown. Sin garantía de terminación ordenada.",
+      "recommendation": "Almacenar la task, usar anyio.start_task() o cancel scope, cancelar explícitamente en shutdown."
+    },
+    {
+      "id": "CODE-09",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/server.py",
+      "line": 163,
+      "title": "asyncio.sleep en contexto anyio",
+      "description": "await asyncio.sleep(...) en _maintenance_loop. No respeta cancelación cooperativa de anyio. El proyecto usa anyio.run() como entry point.",
+      "impact": "Potencialmente no cancelable correctamente en backends no-asyncio (Trio).",
+      "recommendation": "Usar anyio.sleep()."
+    },
+    {
+      "id": "CODE-10",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/ui/chat_tui.py",
+      "line": 186,
+      "title": "MCPClient no verifica IDs de response",
+      "description": "_request() incrementa _msg_id pero no verifica que resp['id'] == _msg_id. Si un response timeout causa reintento, los IDs se desincronizan permanentemente. Todas las respuestas subsecuentes se asignan a herramientas incorrectas.",
+      "impact": "Desincronización silenciosa request/response en el TUI.",
+      "recommendation": "Verificar resp['id'] == _msg_id - 1. Usar dict de pending requests keyed by id."
+    },
+    {
+      "id": "CODE-11",
+      "severity": "MEDIUM",
+      "file": "src/agent_bridge/tools/planner.py",
+      "line": 141,
+      "title": "JSON injection en _get_plan vía título almacenado",
+      "description": "f'...\"title\": \"{row['title']}\"...' — el título viene de la DB. Aunque parametrizado al insertar, cualquier título con '\"' rompe el JSON de salida.",
+      "impact": "Respuesta malformada en plan.get si el título contiene caracteres especiales.",
+      "recommendation": "Usar json.dumps() en todas las respuestas."
+    },
+    {
+      "id": "CODE-13",
+      "severity": "LOW",
+      "file": "src/agent_bridge/server.py",
+      "line": 179,
+      "title": "Tipo impreciso en create_server",
+      "description": "return type es tuple[Server, callable]. callable no revela la firma. Debería ser Callable[[], Awaitable[None]].",
+      "impact": "Linters y type checkers no pueden verificar el tipo correctamente.",
+      "recommendation": "Usar Callable[[], Awaitable[None]] de collections.abc."
+    },
+    {
+      "id": "CODE-14",
+      "severity": "LOW",
+      "file": "src/agent_bridge/state/database.py",
+      "line": 238,
+      "title": "Sin timeout en operaciones DB vía anyio.to_thread.run_sync",
+      "description": "Todas las operaciones DB pasan por anyio.to_thread.run_sync sin timeout. Si SQLite se bloquea, el thread worker queda bloqueado indefinidamente.",
+      "impact": "Potenciales freezes del servidor bajo alta contención.",
+      "recommendation": "Usar anyio.to_thread.run_sync(func, cancellable=True) con fail_after timeout."
+    },
+    {
+      "id": "CODE-15",
+      "severity": "LOW",
+      "file": "src/agent_bridge/main.py",
+      "line": 106,
+      "title": "Uso de API privada request._send en SSE handler",
+      "description": "request._send es atributo privado de Starlette. No forma parte de la API pública.",
+      "impact": "Rotura silenciosa al actualizar Starlette.",
+      "recommendation": "Usar API pública de Starlette/ASGI o verificar compatibilidad en tests de integración."
+    },
+    {
+      "id": "CODE-16",
+      "severity": "LOW",
+      "file": "tests/",
+      "line": 1,
+      "title": "Faltan tests en herramientas específicas",
+      "description": "Sin tests para: plan.update, plan.export, plan.import, skill.get, agent.set_status, with_transaction rollback, schema migrations, DB locked recovery.",
+      "impact": "Cobertura incompleta. Riesgo de regresiones.",
+      "recommendation": "Agregar tests unitarios para cada handler faltante y path de error."
+    },
+    {
+      "id": "CODE-17",
+      "severity": "INFO",
+      "file": "src/agent_bridge/chat/__init__.py",
+      "line": 1,
+      "title": "Módulo chat/__init__.py vacío",
+      "description": "El archivo está vacío. No se referencia en ningún import del proyecto.",
+      "impact": "Código muerto. Confunde la estructura del proyecto.",
+      "recommendation": "Eliminar el directorio chat/ si no se va a usar."
+    },
+    {
+      "id": "CODE-18",
+      "severity": "INFO",
+      "file": "(project)",
+      "line": 1,
+      "title": "Sin linter configurado",
+      "description": "No hay ruff, flake8, mypy, ni pyproject.toml con config de linter. Type checking estático ausente.",
+      "impact": "Los errores de tipo y estilo solo se detectan en runtime.",
+      "recommendation": "Configurar ruff + mypy en pyproject.toml."
+    }
+  ]
+}

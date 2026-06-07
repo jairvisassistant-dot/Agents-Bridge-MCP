@@ -1,0 +1,129 @@
+---
+name: agent-bridge-dev
+description: "Trigger: @dev.Skill, @desarrollador. Conecta OpenCode al Agent Bridge como rol Desarrollador, sincroniza el repo, reporta disponibilidad en la TUI y gestiona el ciclo de trabajo del desarrollador."
+license: Apache-2.0
+metadata:
+  author: gentleman-programming
+  version: "1.0"
+---
+
+## Activation Contract
+
+Ejecutar SOLO cuando el humano invoque explícitamente `@dev.Skill` o lo solicite con los triggers. No auto-ejecutar al inicio de la sesión.
+
+El humano ya tiene la TUI corriendo en otra terminal. Esta skill conecta esta terminal (OpenCode) al ecosistema Agent Bridge como el agente **Desarrollador**.
+
+---
+
+## Hard Rules
+
+- **Siempre hacer git pull** antes de empezar a trabajar.
+- **Siempre hacer git push** antes de finalizar o al cambiar de tarea importante.
+- **Siempre reportar disponibilidad en la TUI** via `chat.send` al conectarse.
+- **Nunca trabajar sin estar conectado** al bridge. Si la conexión falla, reportar el error y detenerse.
+- **Seguir el rol Desarrollador**: solo podés usar las tools permitidas para ese rol (`task.list`, `task.get`, `task.claim`, `task.submit_work`, `chat.*`, `agent.*`, `skill.*`).
+- **Si el humano interviene** via TUI con `@desarrollador`, atender inmediatamente.
+
+---
+
+## Decision Gates
+
+| Situación | Acción |
+|-----------|--------|
+| `agent-bridge` no está instalado | Instalarlo con `uv tool install --editable <path>` |
+| El bridge (SSE) no responde | Intentar reconexión, si falla avisar por stderr |
+| No hay tareas pendientes | Reportar "No hay tareas pendientes" y esperar instrucciones |
+| Hay tareas pendientes | Listarlas y preguntar al humano cuál tomar |
+| El humano pide algo via TUI | Priorizar ese mensaje sobre el plan actual |
+| Git push falla por conflictos | NO resolver automáticamente. Avisar al humano |
+
+---
+
+## Execution Steps
+
+### Paso 1: Verificar entorno
+
+```bash
+which agent-bridge || uv tool list | grep agent-bridge
+```
+
+Si no está instalado:
+```bash
+uv tool install --editable /home/jilz/Escritorio/Agents-Bridge-MCP
+```
+
+### Paso 2: Sincronizar repositorio
+
+```bash
+git pull --rebase
+```
+
+Si hay conflictos, avisar al humano y detenerse.
+
+### Paso 3: Conectar al Agent Bridge
+
+Spawnear el bridge en modo stdio con la identidad del desarrollador:
+
+```
+AGENT_BRIDGE_ID=opencode-1 uv run agent-bridge --transport sse --host 127.0.0.1 --port 8765
+```
+
+Verificar conexión llamando `agent.heartbeat` — si falla, esperar 2s y reintentar hasta 3 veces. Si no hay conexión, avisar al humano.
+
+Determinar la dirección del SSE server:
+- Por defecto: `http://127.0.0.1:8765/sse`
+- Si el humano especificó otro puerto, usar ese
+
+### Paso 4: Reportar disponibilidad en la TUI
+
+Llamar `chat.send` con:
+
+```
+sender: "desarrollador"
+text: "🟢 Desarrollador conectado y listo para trabajar"
+```
+
+### Paso 5: Consultar tareas pendientes
+
+Llamar `task.list` con `status: "pending"`.
+
+- Si hay tareas → mostrarlas al humano y preguntar si quiere tomar alguna
+- Si no hay → reportar "No hay tareas pendientes. Esperando instrucciones del humano o del arquitecto."
+
+### Paso 6: Ciclo de trabajo
+
+Mientras el humano no indique lo contrario, mantener el ciclo:
+
+1. Llamar `agent.heartbeat` periódicamente (cada ~30s) para mantener la conexión activa
+2. Esperar mensajes del bridge (`chat.read`)
+3. Si hay un `@desarrollador`, procesar el mensaje
+4. Ejecutar las tareas asignadas
+5. Reportar progreso via `chat.send`
+
+### Paso 7: Subir cambios al finalizar
+
+Antes de cerrar la sesión o cuando el humano lo indique:
+
+```bash
+git add -A
+git commit -m "feat: ..."
+git push
+```
+
+Avisar en la TUI:
+
+```
+chat.send(sender="desarrollador", text="⬆ Cambios subidos al repo")
+```
+
+---
+
+## Output Contract
+
+Al finalizar la ejecución devolver:
+
+- **status**: `connected` | `synced` | `error`
+- **tasks_found**: cantidad de tareas pendientes
+- **git_status**: `clean` | `unpushed` | `conflicts`
+- **bridge_status**: `online` | `offline`
+- **summary**: resumen de una línea de lo que se hizo
