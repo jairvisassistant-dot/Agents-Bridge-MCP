@@ -22,7 +22,8 @@ from agent_bridge.tools.tasks import TASK_TOOLS, handle_task_tool
 logger = logging.getLogger(__name__)
 
 # ── Maintenance loop lifecycle ───────────────────────────────────
-_maintenance_scope: anyio.CancelScope | None = None
+# Dict keyed by db_path so each server instance has its own scope
+_maintenance_scopes: dict[str, anyio.CancelScope] = {}
 
 # ── Hello-world tool ──────────────────────────────────────────────
 HELLO_TOOL = types.Tool(
@@ -307,14 +308,15 @@ def create_server(
 
     async def init() -> None:
         """Initialize database on server start."""
-        global _maintenance_scope
+        global _maintenance_scopes
         await db.initialize()
-        # Start background tasks inside a CancelScope
-        if _maintenance_scope is None:
-            _maintenance_scope = anyio.CancelScope()
+        # Start background tasks inside a CancelScope (per db_path)
+        if db.db_path not in _maintenance_scopes:
+            scope = anyio.CancelScope()
+            _maintenance_scopes[db.db_path] = scope
 
             async def _wrapper():
-                with _maintenance_scope:
+                with scope:
                     await _maintenance_loop(db, config)
 
             # Fire-and-forget: schedule the wrapper on the event loop.

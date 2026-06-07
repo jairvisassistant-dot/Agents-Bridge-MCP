@@ -6,6 +6,8 @@
     "task.list",
     "task.get",
     "task.claim",
+    "task.update",
+    "task.delete",
     "task.submit_work",
     "chat.send",
     "chat.read",

@@ -172,11 +172,21 @@ async def _approve_review(db: Database, args: dict) -> list[types.TextContent]:
                     })
                 )]
 
+    # Read current status FIRST and validate BEFORE transaction
+    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+    if row is None:
+        return [types.TextContent(type="text", text='{"error": "task not found"}')]
+
+    try:
+        validate_task_transition(row["status"], "approved")
+    except TransitionError as e:
+        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
     # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
     def _do_approve(conn: sqlite3.Connection) -> int:
         cur = conn.execute(
-            "UPDATE tasks SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND status = 'review'",
-            (task_id,),
+            "UPDATE tasks SET status = 'approved', updated_at = datetime('now') WHERE id = ? AND status = ?",
+            (task_id, row["status"]),
         )
         if cur.rowcount == 0:
             return 0
@@ -190,14 +200,10 @@ async def _approve_review(db: Database, args: dict) -> list[types.TextContent]:
     affected = await db.with_transaction(_do_approve)
 
     if affected == 0:
-        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-        if row is None:
-            return [types.TextContent(type="text", text='{"error": "task not found"}')]
+        # Race condition: task status changed between SELECT and transaction
         return [types.TextContent(
             type="text",
-            text=json.dumps({
-                "error": f"task is in '{row['status']}' state, expected 'review'"
-            })
+            text=json.dumps({"error": "concurrent approve detected, task status changed"}),
         )]
 
     logger.info("Task %s approved", task_id)
@@ -238,12 +244,22 @@ async def _request_changes(db: Database, args: dict) -> list[types.TextContent]:
     if cycle_error:
         return [types.TextContent(type="text", text=cycle_error)]
 
+    # Read current status FIRST and validate BEFORE transaction
+    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+    if row is None:
+        return [types.TextContent(type="text", text='{"error": "task not found"}')]
+
+    try:
+        validate_task_transition(row["status"], "changes_requested")
+    except TransitionError as e:
+        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
     # Atomic transaction: update task + review in one BEGIN IMMEDIATE block
     def _do_request_changes(conn: sqlite3.Connection) -> int:
         cur = conn.execute(
             "UPDATE tasks SET status = 'changes_requested', updated_at = datetime('now') "
-            "WHERE id = ? AND status = 'review'",
-            (task_id,),
+            "WHERE id = ? AND status = ?",
+            (task_id, row["status"]),
         )
         if cur.rowcount == 0:
             return 0
@@ -257,14 +273,10 @@ async def _request_changes(db: Database, args: dict) -> list[types.TextContent]:
     affected = await db.with_transaction(_do_request_changes)
 
     if affected == 0:
-        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-        if row is None:
-            return [types.TextContent(type="text", text='{"error": "task not found"}')]
+        # Race condition: task status changed between SELECT and transaction
         return [types.TextContent(
             type="text",
-            text=json.dumps({
-                "error": f"task is in '{row['status']}' state, expected 'review'"
-            })
+            text=json.dumps({"error": "concurrent change request detected, task status changed"}),
         )]
 
     logger.info("Changes requested for task %s: %s", task_id, changes)

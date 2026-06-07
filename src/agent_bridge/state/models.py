@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 # ── Plan ──────────────────────────────────────────────────────────
 
-PlanStatus = Literal["idle", "planning", "tasks_ready", "in_progress", "completed"]
+PlanStatus = Literal["idle", "planning", "tasks_ready", "in_progress", "completed", "archived"]
 
 
 class Plan(BaseModel):

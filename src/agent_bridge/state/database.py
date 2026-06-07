@@ -477,6 +477,34 @@ class Database:
     async def import_plan(self, plan_data: dict) -> dict:
         """Import a plan with its tasks and reviews (INSERT OR IGNORE)."""
 
+        from agent_bridge.state.models import PlanStatus, TaskStatus, ReviewStatus
+        from typing import get_args
+
+        VALID_PLAN_STATUSES: set[str] = set(get_args(PlanStatus))
+        VALID_TASK_STATUSES: set[str] = set(get_args(TaskStatus))
+        VALID_REVIEW_STATUSES: set[str] = set(get_args(ReviewStatus))
+
+        plan = plan_data.get("plan", {})
+        plan_status = plan.get("status", "idle")
+        if plan_status not in VALID_PLAN_STATUSES:
+            raise ValueError(f"Invalid plan status: '{plan_status}'. Valid values: {sorted(VALID_PLAN_STATUSES)}")
+
+        for i, task in enumerate(plan_data.get("tasks", [])):
+            task_status = task.get("status", "pending")
+            if task_status not in VALID_TASK_STATUSES:
+                raise ValueError(
+                    f"Invalid task status: '{task_status}' at index {i}. "
+                    f"Valid values: {sorted(VALID_TASK_STATUSES)}"
+                )
+
+        for i, review in enumerate(plan_data.get("reviews", [])):
+            review_status = review.get("status", "pending")
+            if review_status not in VALID_REVIEW_STATUSES:
+                raise ValueError(
+                    f"Invalid review status: '{review_status}' at index {i}. "
+                    f"Valid values: {sorted(VALID_REVIEW_STATUSES)}"
+                )
+
         def _import():
             with self._lock:
                 conn = self._connect()

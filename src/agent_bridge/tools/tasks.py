@@ -154,6 +154,16 @@ async def _create_task(db: Database, args: dict) -> list[types.TextContent]:
     if not plan_id:
         return [types.TextContent(type="text", text='{"error": "plan_id required"}')]
 
+    # Validate plan is not in a terminal state
+    plan_row = await db.execute_one("SELECT status FROM plans WHERE id = ?", (plan_id,))
+    if plan_row is None:
+        return [types.TextContent(type="text", text='{"error": "plan not found"}')]
+    if plan_row["status"] in ("completed", "archived"):
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"error": f"plan is {plan_row['status']}, cannot add tasks"})
+        )]
+
     # Validate depends_on references an existing task
     if depends_on:
         dep = await db.execute_one("SELECT id FROM tasks WHERE id = ?", (depends_on,))
@@ -277,26 +287,30 @@ async def _claim_task(db: Database, args: dict) -> list[types.TextContent]:
             )
             current = parent["depends_on"] if parent else None
 
-    # Atomic: UPDATE only if pending, rowcount tells us if it worked
+    # Read current status FIRST
+    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+    if row is None:
+        return [types.TextContent(type="text", text='{"error": "task not found"}')]
+
+    # Validate transition BEFORE write (state machine enforcement)
+    try:
+        validate_task_transition(row["status"], "in_progress")
+    except TransitionError as e:
+        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
+    # Atomic: UPDATE using the read status (captures race conditions)
     affected = await db.execute_write(
         "UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = datetime('now') "
-        "WHERE id = ? AND status = 'pending'",
-        (agent, task_id),
+        "WHERE id = ? AND status = ?",
+        (agent, task_id, row["status"]),
     )
 
     if affected == 0:
-        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-        if row is None:
-            return [types.TextContent(type="text", text='{"error": "task not found"}')]
-        try:
-            validate_task_transition(row["status"], "in_progress")
-        except TransitionError as e:
-            return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-        # Shouldn't reach here if validate passed, but safeguard
+        # Race condition: another claim won between our SELECT and UPDATE
         return [
             types.TextContent(
                 type="text",
-                text=json.dumps({"error": f"task is {row['status']}, could not claim"}),
+                text=json.dumps({"error": "concurrent claim detected, task was already claimed"}),
             )
         ]
 
@@ -321,25 +335,30 @@ async def _submit_work(db: Database, args: dict) -> list[types.TextContent]:
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]
 
-    # Atomic: UPDATE only if status allows transition to review
+    # Read current status FIRST
+    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
+    if row is None:
+        return [types.TextContent(type="text", text='{"error": "task not found"}')]
+
+    # Validate transition BEFORE write (state machine enforcement)
+    try:
+        validate_task_transition(row["status"], "review")
+    except TransitionError as e:
+        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+
+    # Atomic: UPDATE using the read status (captures race conditions)
     affected = await db.execute_write(
         "UPDATE tasks SET status = 'review', submission_summary = ?, diff_text = ?, "
-        "updated_at = datetime('now') WHERE id = ? AND status IN ('in_progress', 'changes_requested')",
-        (summary, diff, task_id),
+        "updated_at = datetime('now') WHERE id = ? AND status = ?",
+        (summary, diff, task_id, row["status"]),
     )
 
     if affected == 0:
-        row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-        if row is None:
-            return [types.TextContent(type="text", text='{"error": "task not found"}')]
-        try:
-            validate_task_transition(row["status"], "review")
-        except TransitionError as e:
-            return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        # Race condition: status changed between SELECT and UPDATE
         return [
             types.TextContent(
                 type="text",
-                text=json.dumps({"error": f"task is {row['status']}, could not submit"}),
+                text=json.dumps({"error": "concurrent submit detected, task status changed"}),
             )
         ]
 

@@ -94,7 +94,14 @@ CHAT_TOOLS = [
             "type": "object",
             "properties": {
                 "thread_id": {"type": "string", "description": "Filter by thread"},
-                "since": {"type": "string", "description": "Message ID to start from"},
+                "since_rowid": {
+                    "type": "integer",
+                    "description": "Message rowid to start from (preferred — avoids UUID ambiguity)",
+                },
+                "since": {
+                    "type": "string",
+                    "description": "Legacy: message UUID to start from. Prefer since_rowid instead.",
+                },
                 "target": {
                     "type": "string",
                     "description": "Filter by @mention target",
@@ -483,6 +490,7 @@ async def _send_message(db: Database, args: dict) -> list[types.TextContent]:
 
 async def _read_messages(db: Database, args: dict) -> list[types.TextContent]:
     thread_id = args.get("thread_id")
+    since_rowid = args.get("since_rowid")
     since = args.get("since")
     target = args.get("target")
     msg_type_filter = args.get("msg_type")
@@ -497,14 +505,17 @@ async def _read_messages(db: Database, args: dict) -> list[types.TextContent]:
         query += " AND thread_id = ?"
         params.append(thread_id)
 
-    if since:
-        # Accept numeric rowid (preferred) or legacy UUID string.
-        # UUIDs compared as strings do NOT sort chronologically,
-        # which causes the TUI to miss messages when polling.
+    # since_rowid (int) is the preferred parameter for polling — avoids
+    # ambiguity with UUIDs that happen to be parseable as integers.
+    # since (string UUID) is kept for backward compatibility.
+    if since_rowid is not None:
+        query += " AND rowid > ?"
+        params.append(since_rowid)
+    elif since:
         try:
-            since_rowid = int(since)
+            since_rowid_int = int(since)
             query += " AND rowid > ?"
-            params.append(since_rowid)
+            params.append(since_rowid_int)
         except ValueError:
             # Backward-compat: lookup rowid by UUID
             query += " AND rowid > COALESCE((SELECT rowid FROM messages WHERE id = ?), -1)"

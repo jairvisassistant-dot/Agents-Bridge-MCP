@@ -272,10 +272,12 @@ async def _archive_plan(db: Database, args: dict) -> list[types.TextContent]:
     if row is None:
         return [types.TextContent(type="text", text='{"error": "plan not found"}')]
 
-    if row["status"] in ("completed", "archived"):
+    try:
+        validate_plan_transition(row["status"], "archived")
+    except TransitionError as e:
         return [types.TextContent(
             type="text",
-            text=json.dumps({"error": f"plan is already {row['status']}, cannot archive"})
+            text=json.dumps({"error": str(e)})
         )]
 
     await db.execute(
@@ -301,7 +303,15 @@ async def _delete_plan(db: Database, args: dict) -> list[types.TextContent]:
     if row is None:
         return [types.TextContent(type="text", text='{"error": "plan not found"}')]
 
-    # Cascade: delete reviews → tasks → plan
+    # Full cascade: messages → threads → reviews → tasks → plan
+    await db.execute(
+        "DELETE FROM messages WHERE thread_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
+        (plan_id,),
+    )
+    await db.execute(
+        "DELETE FROM threads WHERE id IN (SELECT id FROM tasks WHERE plan_id = ?)",
+        (plan_id,),
+    )
     await db.execute(
         "DELETE FROM reviews WHERE task_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
         (plan_id,),

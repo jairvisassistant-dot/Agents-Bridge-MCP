@@ -40,11 +40,12 @@ def validate_transition[T](
 # ── Plan transitions ──────────────────────────────────────────────
 
 PLAN_TRANSITIONS: dict[PlanStatus, set[PlanStatus]] = {
-    "idle": {"planning"},
-    "planning": {"tasks_ready", "idle"},
-    "tasks_ready": {"in_progress", "idle"},
-    "in_progress": {"completed", "idle"},
+    "idle": {"planning", "archived"},
+    "planning": {"tasks_ready", "idle", "archived"},
+    "tasks_ready": {"in_progress", "idle", "archived"},
+    "in_progress": {"completed", "idle", "archived"},
     "completed": set(),  # terminal state
+    "archived": set(),  # terminal state — no further transitions
 }
 
 

@@ -532,8 +532,8 @@ class TestMaintenanceLoop:
 
             # After init, maintenance should have started
             from agent_bridge import server as mod
-            # The module-level scope should have been created
-            assert mod._maintenance_scope is not None, "Maintenance CancelScope should be created"
+            # The scope keyed by db_path should have been created
+            assert db_path in mod._maintenance_scopes, "Maintenance CancelScope should be created"
 
         anyio.run(run)
 
@@ -556,10 +556,11 @@ class TestMaintenanceLoop:
 
             from agent_bridge import server as mod
             # Cancel the scope
-            if mod._maintenance_scope is not None:
-                mod._maintenance_scope.cancel()
+            scope = mod._maintenance_scopes.get(db_path)
+            if scope is not None:
+                scope.cancel()
 
-            # After cancellation, scope should still exist but be cancelled
-            assert mod._maintenance_scope is not None
+            # After cancellation, scope should still exist (key is kept) but be cancelled
+            assert mod._maintenance_scopes.get(db_path) is not None
 
         anyio.run(run)
