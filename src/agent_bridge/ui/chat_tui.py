@@ -192,7 +192,13 @@ class MCPClient:
         return resp
 
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any] | None:
-        """Send a JSON-RPC request and read one response."""
+        """Send a JSON-RPC request and read one response.
+
+        Verifies that the response ``id`` matches the request ``id`` to
+        detect desynchronisation between sequential request/response
+        pairs (PROD-05).  If the IDs do not match the connection is
+        marked as uninitialised so the caller can reconnect.
+        """
         if self._process is None or self._process.stdin is None or self._process.stdout is None:
             self._initialized = False
             raise ConnectionError("Not connected")
@@ -203,6 +209,7 @@ class MCPClient:
             "method": method,
             "params": params,
         }
+        request_id = self._msg_id
         self._msg_id += 1
 
         try:
@@ -214,7 +221,19 @@ class MCPClient:
             if not response_bytes:
                 self._initialized = False
                 return None
-            return json.loads(response_bytes.decode("utf-8"))
+
+            response = json.loads(response_bytes.decode("utf-8"))
+
+            # Verify response ID matches request ID (desync detection)
+            if response.get("id") != request_id:
+                logger.error(
+                    "Response ID mismatch: sent id=%d, got id=%s. Connection desynchronised.",
+                    request_id, response.get("id"),
+                )
+                self._initialized = False
+                return None
+
+            return response
         except (TimeoutError, BrokenPipeError, OSError):
             self._initialized = False
             return None
@@ -338,7 +357,9 @@ class ChatTUI(App):
             return
 
         self._write_status("AGENT BRIDGE CHAT — Conectando…")
-        # Start periodic refresh
+        # Start periodic refresh via polling (5s interval).
+        # This is NOT real-time push — messages appear within ~5s.
+        # The ChatPanel in kanban mode uses the same polling approach.
         self.set_interval(5, self._poll)
 
     def _write_status(self, text: str) -> None:

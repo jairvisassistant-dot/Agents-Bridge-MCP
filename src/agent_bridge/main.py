@@ -26,7 +26,7 @@ def _handle_start(args: argparse.Namespace) -> None:
 
     # ── UI-only mode: just launch the TUI ──────────────────────────
     if args.ui_only:
-        logger.info("Starting TUI only (connecting to existing server on port %d)", port)
+        logger.info("Starting TUI standalone (direct DB mode, no SSE server)")
         if getattr(args, "kanban", False):
             from agent_bridge.ui.kanban_tui import main as tui_main
         else:
@@ -706,7 +706,7 @@ def _handle_init(args: argparse.Namespace) -> None:
 def _handle_reset(args: argparse.Namespace) -> None:
     """Drop all tables and recreate the schema."""
     if not args.force:
-        response = input("¿Estás seguro? Esto borrará TODOS los datos (planes, tareas, mensajes). [y/N] ")
+        response = input("¿Estás seguro? Esto borrará TODOS los datos (planes, tareas, revisiones, agentes, mensajes, threads). [y/N] ")
         if response.lower() not in ("y", "yes"):
             print("Cancelado.")
             return

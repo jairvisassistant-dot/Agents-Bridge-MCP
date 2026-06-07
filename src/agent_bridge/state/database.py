@@ -8,7 +8,7 @@ serialized via threading.RLock. WAL mode + BEGIN IMMEDIATE on writes
 ensures write-ahead locking without deadlocks.
 
 Dry-run mode: when _dry_run=True, write operations are logged and
-skipped. Each operation gets a fresh :memory: connection so no
+skipped. A single cached :memory: connection is reused, so no
 persistent state is modified.
 """
 
@@ -375,6 +375,69 @@ class Database:
                     raise
 
         return await anyio.to_thread.run_sync(_run)
+
+    async def transition_task(
+        self,
+        task_id: str,
+        target_status: str,
+        *,
+        extra_sets: str = "",
+        extra_params: tuple = (),
+    ) -> bool:
+        """Validate a task state transition and apply it atomically.
+
+        Reads the current status, validates via the state machine, then
+        updates with optimistic locking (``WHERE status = current``).
+        All three steps happen inside a single ``with_transaction`` so
+        concurrent writes cannot bypass the guard.
+
+        This is the **centralized architectural guard** — every handler
+        that changes a task's status MUST route through this method so
+        that adding new transitions to ``state_machine.py`` is
+        automatically enforced at the DB layer.
+
+        Args:
+            task_id: The task to transition.
+            target_status: Target status (e.g. ``"in_progress"``).
+            extra_sets: Optional extra ``SET`` clauses
+                (e.g. ``"assignee = ?"``).
+            extra_params: Parameters for *extra_sets*.
+
+        Returns:
+            ``True`` if the transition was applied, ``False`` if the
+            task was not found, the transition is invalid, or a
+            concurrent write changed the status first.
+        """
+        from agent_bridge.state.state_machine import (
+            TransitionError,
+            validate_task_transition,
+        )
+
+        def _do(conn: sqlite3.Connection) -> bool:
+            cur = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False
+            current = row["status"]
+
+            try:
+                validate_task_transition(current, target_status)
+            except TransitionError:
+                return False
+
+            sets = f"status = ?, updated_at = datetime('now')"
+            if extra_sets:
+                sets += ", " + extra_sets
+
+            cur = conn.execute(
+                f"UPDATE tasks SET {sets} WHERE id = ? AND status = ?",
+                (target_status, *extra_params, task_id, current),
+            )
+            return cur.rowcount > 0
+
+        return await self.with_transaction(_do)
 
     async def close(self) -> None:
         """Close the persistent connection and release resources."""

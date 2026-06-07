@@ -197,18 +197,31 @@ async def _heartbeat(db: Database, config: BridgeConfig, args: dict) -> list[typ
     if not agent_id:
         return [types.TextContent(type="text", text='{"error": "agent_id required"}')]
 
-    # Resolve role: bridge.json takes precedence, then role_hint, then default
+    # Resolve role: bridge.json takes precedence
     role = config.get_role_for_agent(agent_id)
-    if role == "default" and role_hint:
-        role = role_hint
+    if role == "default":
+        # Check existing DB role — freeze once set (CODE-03: prevent privilege escalation)
+        existing = await db.execute_one(
+            "SELECT role FROM agents WHERE agent_id = ?", (agent_id,)
+        )
+        if existing:
+            role = existing["role"]
+        elif role_hint:
+            role = role_hint
 
     now = datetime.now(UTC).isoformat()
 
     await db.execute(
-        """INSERT OR REPLACE INTO agents (agent_id, role, status, last_seen, connected_since)
+        """INSERT INTO agents (agent_id, role, status, last_seen, connected_since, metadata)
            VALUES (?, ?, ?, ?,
-               COALESCE((SELECT connected_since FROM agents WHERE agent_id = ?), ?)
-           )""",
+               COALESCE((SELECT connected_since FROM agents WHERE agent_id = ?), ?),
+               '{}')
+           ON CONFLICT(agent_id) DO UPDATE SET
+               status = excluded.status,
+               last_seen = excluded.last_seen,
+               connected_since = COALESCE(agents.connected_since, excluded.connected_since)
+           -- NOTE: metadata is NOT updated here (CODE-02: preserve existing metadata)
+           """,
         (agent_id, role, status, now, agent_id, now),
     )
 

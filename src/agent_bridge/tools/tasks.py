@@ -2,12 +2,13 @@
 
 import json
 import logging
+import sqlite3
 import uuid
 
 import mcp.types as types
 
 from agent_bridge.state.database import Database
-from agent_bridge.state.state_machine import TransitionError, validate_task_transition
+
 
 logger = logging.getLogger(__name__)
 
@@ -287,30 +288,17 @@ async def _claim_task(db: Database, args: dict) -> list[types.TextContent]:
             )
             current = parent["depends_on"] if parent else None
 
-    # Read current status FIRST
-    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-    if row is None:
-        return [types.TextContent(type="text", text='{"error": "task not found"}')]
-
-    # Validate transition BEFORE write (state machine enforcement)
-    try:
-        validate_task_transition(row["status"], "in_progress")
-    except TransitionError as e:
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-    # Atomic: UPDATE using the read status (captures race conditions)
-    affected = await db.execute_write(
-        "UPDATE tasks SET status = 'in_progress', assignee = ?, updated_at = datetime('now') "
-        "WHERE id = ? AND status = ?",
-        (agent, task_id, row["status"]),
+    # Centralized guard: validate + update atomically via db.transition_task()
+    success = await db.transition_task(
+        task_id, "in_progress",
+        extra_sets="assignee = ?",
+        extra_params=(agent,),
     )
-
-    if affected == 0:
-        # Race condition: another claim won between our SELECT and UPDATE
+    if not success:
         return [
             types.TextContent(
                 type="text",
-                text=json.dumps({"error": "concurrent claim detected, task was already claimed"}),
+                text=json.dumps({"error": "cannot claim task — invalid transition, task not found, or already claimed"}),
             )
         ]
 
@@ -335,30 +323,17 @@ async def _submit_work(db: Database, args: dict) -> list[types.TextContent]:
     if not task_id:
         return [types.TextContent(type="text", text='{"error": "task_id required"}')]
 
-    # Read current status FIRST
-    row = await db.execute_one("SELECT status FROM tasks WHERE id = ?", (task_id,))
-    if row is None:
-        return [types.TextContent(type="text", text='{"error": "task not found"}')]
-
-    # Validate transition BEFORE write (state machine enforcement)
-    try:
-        validate_task_transition(row["status"], "review")
-    except TransitionError as e:
-        return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
-
-    # Atomic: UPDATE using the read status (captures race conditions)
-    affected = await db.execute_write(
-        "UPDATE tasks SET status = 'review', submission_summary = ?, diff_text = ?, "
-        "updated_at = datetime('now') WHERE id = ? AND status = ?",
-        (summary, diff, task_id, row["status"]),
+    # Centralized guard: validate + update atomically via db.transition_task()
+    success = await db.transition_task(
+        task_id, "review",
+        extra_sets="submission_summary = ?, diff_text = ?",
+        extra_params=(summary, diff),
     )
-
-    if affected == 0:
-        # Race condition: status changed between SELECT and UPDATE
+    if not success:
         return [
             types.TextContent(
                 type="text",
-                text=json.dumps({"error": "concurrent submit detected, task status changed"}),
+                text=json.dumps({"error": "cannot submit — invalid transition, task not found, or already submitted"}),
             )
         ]
 
@@ -504,9 +479,12 @@ async def _delete_task(db: Database, args: dict) -> list[types.TextContent]:
             })
         )]
 
-    # Delete associated reviews first, then the task
-    await db.execute("DELETE FROM reviews WHERE task_id = ?", (task_id,))
-    await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+    # Delete associated reviews first, then the task (atomic)
+    def _do_delete_task(conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM reviews WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+
+    await db.with_transaction(_do_delete_task)
 
     logger.info("Deleted task %s", task_id)
     return [

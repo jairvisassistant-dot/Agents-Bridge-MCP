@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 import uuid
 
 import mcp.types as types
@@ -213,7 +214,7 @@ async def _update_plan(db: Database, args: dict) -> list[types.TextContent]:
     except TransitionError as e:
         return [types.TextContent(type="text", text=json.dumps({"error": str(e)}))]
 
-    await db.execute(
+    await db.execute_write(
         "UPDATE plans SET status = ?, updated_at = datetime('now') WHERE id = ?",
         (target_status, plan_id),
     )
@@ -304,20 +305,23 @@ async def _delete_plan(db: Database, args: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text='{"error": "plan not found"}')]
 
     # Full cascade: messages → threads → reviews → tasks → plan
-    await db.execute(
-        "DELETE FROM messages WHERE thread_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
-        (plan_id,),
-    )
-    await db.execute(
-        "DELETE FROM threads WHERE id IN (SELECT id FROM tasks WHERE plan_id = ?)",
-        (plan_id,),
-    )
-    await db.execute(
-        "DELETE FROM reviews WHERE task_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
-        (plan_id,),
-    )
-    await db.execute("DELETE FROM tasks WHERE plan_id = ?", (plan_id,))
-    await db.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+    def _do_delete_plan(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
+            (plan_id,),
+        )
+        conn.execute(
+            "DELETE FROM threads WHERE id IN (SELECT id FROM tasks WHERE plan_id = ?)",
+            (plan_id,),
+        )
+        conn.execute(
+            "DELETE FROM reviews WHERE task_id IN (SELECT id FROM tasks WHERE plan_id = ?)",
+            (plan_id,),
+        )
+        conn.execute("DELETE FROM tasks WHERE plan_id = ?", (plan_id,))
+        conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+
+    await db.with_transaction(_do_delete_plan)
 
     logger.info("Deleted plan %s with all tasks and reviews", plan_id)
     return [

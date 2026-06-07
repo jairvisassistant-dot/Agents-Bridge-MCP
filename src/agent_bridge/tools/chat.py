@@ -458,6 +458,9 @@ async def _send_message(db: Database, args: dict) -> list[types.TextContent]:
             ]
 
     # ── @mention presence routing ──────────────────────────────────
+    # Design: deliver message + warning instead of rejecting.
+    # The agent sees queued messages when they come back online.
+    # This is intentional — rejecting would lose the message entirely.
     warning = None
     if target in TARGET_ROLE_MAP:
         role = TARGET_ROLE_MAP[target]
