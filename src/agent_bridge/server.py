@@ -320,9 +320,9 @@ def create_server(
                     await _maintenance_loop(db, config)
 
             # Fire-and-forget: schedule the wrapper on the event loop.
-            # In anyio's asyncio backend, get_running_loop().create_task
-            # is the standard fire-and-forget mechanism. We keep the import
-            # local to avoid module-level asyncio exposure.
+            # asyncio.create_task is the accepted escape hatch in anyio
+            # for daemon tasks that outlive structured concurrency scopes.
+            # The CancelScope wrapper provides proper cancellation.
             import asyncio
 
             asyncio.get_running_loop().create_task(_wrapper())

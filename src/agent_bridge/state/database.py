@@ -229,7 +229,13 @@ class Database:
 
         Dry-run mode: returns a fresh ``:memory:`` connection each time
         (never cached) so the object is not shared across threads.
+
+        Raises:
+            RuntimeError: if the caller does not hold ``self._lock``
+            (defensive guard — CODE-08: enforce lock ownership).
         """
+        if not self._lock._is_owned():
+            raise RuntimeError("_connect() must be called while holding self._lock")
         if self._dry_run:
             if self._dry_run_conn is None:
                 self._dry_run_conn = sqlite3.connect(":memory:")
